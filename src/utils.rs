@@ -119,7 +119,10 @@ impl<'a> ByteStr<'a> {
     /// This specialization of `starts_with` is at least 10x faster than normal
     /// `slice::starts_with` for small strings. On some large input it reduced
     /// the total execution time from 10.0s to 0.8s
-    pub fn starts_with<T>(self, needle: T) -> bool where T: AsRef<[u8]> {
+    pub fn starts_with<T>(self, needle: T) -> bool
+    where
+        T: AsRef<[u8]>,
+    {
         let needle: &[u8] = needle.as_ref();
         let slice = self.0;
         let len = needle.len();

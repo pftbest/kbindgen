@@ -1,4 +1,4 @@
-use kbindgen::Tokenizer;
+use kbindgen::tokenizer::Tokenizer;
 
 fn main() {
     let file_name = std::env::args().nth(1).unwrap();
