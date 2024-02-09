@@ -1,3 +1,4 @@
+use kbindgen::parser::Parser;
 use kbindgen::tokenizer::Tokenizer;
 
 fn main() {
@@ -7,7 +8,6 @@ fn main() {
     let mut tk = Tokenizer::new(text.as_slice().into());
     let tokens = tk.tokenize();
 
-    for t in tokens.iter().take(100) {
-        println!("{:?}", t.text);
-    }
+    let mut pa = Parser::new();
+    pa.parse(&tokens);
 }

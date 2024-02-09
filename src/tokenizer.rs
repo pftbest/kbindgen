@@ -1,25 +1,94 @@
 use crate::utils::ByteStr;
 
-static PUNCT_LIST: [&'static [u8]; 48] = [
-    b">>=", b"<<=", b"...", b"||", b"|=", b"^=", b">>", b">=", b"==", b"<=", b"<<", b"/=", b"->",
-    b"-=", b"--", b"+=", b"++", b"*=", b"&=", b"&&", b"%=", b"##", b"!=", b"~", b"}", b"|", b"{",
-    b"^", b"]", b"[", b"?", b">", b"=", b"<", b";", b":", b"/", b".", b"-", b",", b"+", b"*", b")",
-    b"(", b"&", b"%", b"#", b"!",
+struct PToken(&'static [u8], TKind);
+
+static PUNCT_LIST: [PToken; 48] = [
+    PToken(b">>=", TKind::Punct),
+    PToken(b"<<=", TKind::Punct),
+    PToken(b"...", TKind::Punct),
+    PToken(b"||", TKind::Punct),
+    PToken(b"|=", TKind::Punct),
+    PToken(b"^=", TKind::Punct),
+    PToken(b">>", TKind::Punct),
+    PToken(b">=", TKind::Punct),
+    PToken(b"==", TKind::Punct),
+    PToken(b"<=", TKind::Punct),
+    PToken(b"<<", TKind::Punct),
+    PToken(b"/=", TKind::Punct),
+    PToken(b"->", TKind::Punct),
+    PToken(b"-=", TKind::Punct),
+    PToken(b"--", TKind::Punct),
+    PToken(b"+=", TKind::Punct),
+    PToken(b"++", TKind::Punct),
+    PToken(b"*=", TKind::Punct),
+    PToken(b"&=", TKind::Punct),
+    PToken(b"&&", TKind::Punct),
+    PToken(b"%=", TKind::Punct),
+    PToken(b"##", TKind::Punct),
+    PToken(b"!=", TKind::Punct),
+    PToken(b"~", TKind::Punct),
+    PToken(b"}", TKind::CloseBrace),
+    PToken(b"|", TKind::Punct),
+    PToken(b"{", TKind::OpenBrace),
+    PToken(b"^", TKind::Punct),
+    PToken(b"]", TKind::CloseBracket),
+    PToken(b"[", TKind::OpenBracket),
+    PToken(b"?", TKind::Punct),
+    PToken(b">", TKind::Punct),
+    PToken(b"=", TKind::Assignment),
+    PToken(b"<", TKind::Punct),
+    PToken(b";", TKind::Semicolon),
+    PToken(b":", TKind::Colon),
+    PToken(b"/", TKind::Punct),
+    PToken(b".", TKind::Punct),
+    PToken(b"-", TKind::Punct),
+    PToken(b",", TKind::Comma),
+    PToken(b"+", TKind::Punct),
+    PToken(b"*", TKind::Punct),
+    PToken(b")", TKind::CloseParen),
+    PToken(b"(", TKind::OpenParen),
+    PToken(b"&", TKind::Punct),
+    PToken(b"%", TKind::Punct),
+    PToken(b"#", TKind::Punct),
+    PToken(b"!", TKind::Punct),
 ];
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum TokenKind {
+static KEYWORD_LIST: [PToken; 5] = [
+    PToken(b"__attribute__", TKind::Attribute),
+    PToken(b"typedef", TKind::Typedef),
+    PToken(b"struct", TKind::Struct),
+    PToken(b"enum", TKind::Enum),
+    PToken(b"asm", TKind::Asm),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TKind {
     Ident,
     Punct,
     Number,
     String,
     Char,
+    Assignment,
+    Comma,
+    Colon,
+    Semicolon,
+    OpenBrace,
+    CloseBrace,
+    OpenParen,
+    CloseParen,
+    OpenBracket,
+    CloseBracket,
+    Struct,
+    Typedef,
+    Enum,
+    Attribute,
+    Asm,
 }
 
 #[derive(Debug)]
 pub struct Token<'a> {
     pub text: ByteStr<'a>,
-    pub kind: TokenKind,
+    pub kind: TKind,
     pub has_space: bool,
     pub file_name: ByteStr<'a>,
     pub line_number: u32,
@@ -80,7 +149,7 @@ impl<'t> Tokenizer<'t> {
         }
     }
 
-    pub fn new_token<'a>(&'a mut self, t: ByteStr<'t>, k: TokenKind) -> Token<'t> {
+    pub fn new_token<'a>(&'a mut self, t: ByteStr<'t>, k: TKind) -> Token<'t> {
         let token = Token {
             text: t,
             kind: k,
@@ -138,16 +207,16 @@ impl<'t> Tokenizer<'t> {
             if byte.is_ascii_digit() || (byte == b'.' && text.len() > 1 && text[1].is_ascii_digit())
             {
                 let (num_str, rest) = slice_number_literal(text);
-                tokens.push(self.new_token(num_str, TokenKind::Number));
                 text = rest;
+                tokens.push(self.new_token(num_str, TKind::Number));
                 continue;
             }
 
             // Parse char literal
             if byte == b'\'' {
                 let (string, rest) = slice_char_literal(text);
-                tokens.push(self.new_token(string, TokenKind::Char));
                 text = rest;
+                tokens.push(self.new_token(string, TKind::Char));
                 continue;
             }
 
@@ -159,30 +228,44 @@ impl<'t> Tokenizer<'t> {
                 || text.starts_with(b"L\"")
             {
                 let (string, rest) = slice_string_literal(text);
-                tokens.push(self.new_token(string, TokenKind::String));
                 text = rest;
+                tokens.push(self.new_token(string, TKind::String));
                 continue;
             }
 
-            // Parse punctuators
-            for punct in PUNCT_LIST.iter() {
-                if text.starts_with(punct) {
-                    let (p_str, rest) = text.0.split_at(punct.len());
-                    tokens.push(self.new_token(p_str.into(), TokenKind::Punct));
+            // Parse punctuation
+            for token in PUNCT_LIST.iter() {
+                if text.starts_with(token.0) {
+                    let (p_str, rest) = text.0.split_at(token.0.len());
                     text = rest.into();
+                    tokens.push(self.new_token(p_str.into(), token.1));
                     continue 'tokens;
                 }
             }
 
-            // Identifier
+            // Identifiers
             let (ident, rest) = text.slice_where(|c| {
                 let is_ws = c.is_ascii_whitespace();
                 let is_punct = c.is_ascii_punctuation() && c != b'$' && c != b'_';
                 !is_ws && !is_punct
             });
-            tokens.push(self.new_token(ident, TokenKind::Ident));
             text = rest;
-            continue;
+
+            if ident.is_empty() {
+                panic!(
+                    "Found unexpected sequence in the input text at {:?}:{}",
+                    self.file_name, self.line_number
+                );
+            }
+
+            let mut ident_kind = TKind::Ident;
+            for keyword in KEYWORD_LIST.iter() {
+                if ident.0 == keyword.0 {
+                    ident_kind = keyword.1;
+                    break;
+                }
+            }
+            tokens.push(self.new_token(ident, ident_kind));
         }
         tokens
     }
