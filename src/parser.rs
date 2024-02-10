@@ -127,17 +127,47 @@ impl Parser {
         Self {}
     }
 
+    fn parse_declaration(&mut self, node: &mut Node) {
+        match node {
+            &mut Node::Group {
+                ref mut items,
+                ends_with_semicolon,
+            } => {
+
+            },
+            _ => {
+                panic!("Top level declaration should be a group");
+            },
+        }
+    }
+
+    fn parse_top_level(&mut self, root_node: &mut Node) {
+        match root_node {
+            &mut Node::StatementList(ref mut list) => {
+                for statement in list.iter_mut() {
+                    self.parse_declaration(statement);
+                }
+            },
+            _ => {
+                panic!("Top level should be a list");
+            },
+        }
+    }
+
     pub fn parse(&mut self, tokens: TList) {
-        let (rest, node) = parse_node(tokens).unwrap();
+        let (rest, mut node) = parse_node(tokens).unwrap();
         assert_eq!(rest[0].kind, TKind::EndOfFile);
-        //println!("{:#?}", node);
+
         let mut out = String::new();
         print_node(&node, &mut out);
         std::fs::write("out.c", &out).unwrap();
-        out.clear();
-        use std::fmt::Write;
-        writeln!(&mut out, "{:#?}", node).unwrap();
-        std::fs::write("out.txt", &out).unwrap();
+
+        self.parse_top_level(&mut node);
+
+        // use std::fmt::Write;
+        // out.clear();
+        // writeln!(&mut out, "{:#?}", node).unwrap();
+        // std::fs::write("out.txt", &out).unwrap();
     }
 }
 
