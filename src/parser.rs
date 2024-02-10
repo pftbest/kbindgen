@@ -30,6 +30,9 @@ struct Node<'t> {
     token: TRef<'t>,
     items: Vec<Node<'t>>,
     ends_with_semicolon: bool,
+    has_comma: bool,
+    has_assignment: bool,
+    has_typedef: bool,
 }
 
 impl<'t> Node<'t> {
@@ -39,6 +42,9 @@ impl<'t> Node<'t> {
             token,
             items: Vec::new(),
             ends_with_semicolon: false,
+            has_comma: false,
+            has_assignment: false,
+            has_typedef: false,
         }
     }
 
@@ -48,6 +54,9 @@ impl<'t> Node<'t> {
             token,
             items: vec![item],
             ends_with_semicolon: false,
+            has_comma: false,
+            has_assignment: false,
+            has_typedef: false,
         }
     }
 }
@@ -106,7 +115,19 @@ fn parse_group(mut tokens: TList) -> TResult<Node> {
             TKind::CloseBrace | TKind::CloseParen | TKind::CloseBracket | TKind::EndOfFile => {
                 break;
             }
-            _ => {
+            kind => {
+                match kind {
+                    TKind::Comma => {
+                        group.has_comma = true;
+                    }
+                    TKind::Assignment => {
+                        group.has_assignment = true;
+                    }
+                    TKind::Typedef => {
+                        group.has_typedef = true;
+                    }
+                    _ => {}
+                }
                 let node = Node::new(NodeKind::Token, &tokens[0]);
                 group.items.push(node);
                 tokens = &tokens[1..];
@@ -133,31 +154,23 @@ impl Parser {
         Self {}
     }
 
-    // fn parse_declaration(&mut self, node: &mut Node) {
-    //     match node {
-    //         &mut Node::Group {
-    //             ref mut items,
-    //             ends_with_semicolon,
-    //         } => {
+    fn parse_typedef(&mut self, node: &mut Node) {
+        if node.has_comma || node.has_assignment {
+            println!("typedef {:#?}", node);
+        }
+    }
 
-    //         },
-    //         _ => {
-    //             panic!("Top level declaration should be a group");
-    //         },
-    //     }
-    // }
+    fn parse_declaration(&mut self, node: &mut Node) {
+        if node.has_typedef {
+            self.parse_typedef(node);
+        }
+    }
 
-    fn parse_top_level(&mut self, _root_node: &mut Node) {
-        //     match root_node {
-        //         &mut Node::StatementList(ref mut list) => {
-        //             for statement in list.iter_mut() {
-        //                 self.parse_declaration(statement);
-        //             }
-        //         },
-        //         _ => {
-        //             panic!("Top level should be a list");
-        //         },
-        //     }
+    fn parse_top_level(&mut self, root_node: &mut Node) {
+        assert_eq!(root_node.kind, NodeKind::Group);
+        for statement in root_node.items.iter_mut() {
+            self.parse_declaration(statement);
+        }
     }
 
     pub fn parse(&mut self, tokens: TList) {
@@ -169,11 +182,6 @@ impl Parser {
         std::fs::write("out.c", &out).unwrap();
 
         self.parse_top_level(&mut node);
-
-        // use std::fmt::Write;
-        // out.clear();
-        // writeln!(&mut out, "{:#?}", node).unwrap();
-        // std::fs::write("out.txt", &out).unwrap();
     }
 }
 
