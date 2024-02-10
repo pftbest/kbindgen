@@ -83,6 +83,7 @@ pub enum TKind {
     Enum,
     Attribute,
     Asm,
+    EndOfFile,
 }
 
 #[derive(Debug)]
@@ -90,6 +91,7 @@ pub struct Token<'a> {
     pub text: ByteStr<'a>,
     pub kind: TKind,
     pub has_space: bool,
+    pub start_of_line: bool,
     pub file_name: ByteStr<'a>,
     pub line_number: u32,
 }
@@ -149,24 +151,37 @@ impl<'t> Tokenizer<'t> {
         }
     }
 
-    pub fn new_token<'a>(&'a mut self, t: ByteStr<'t>, k: TKind) -> Token<'t> {
+    pub fn tokenize<'a>(&'a mut self) -> Vec<Token<'t>> {
+        let mut tokens = Vec::with_capacity(self.full_text.len() / 5);
+        loop {
+            let token = self.next_token();
+            if token.kind == TKind::EndOfFile {
+                tokens.push(token);
+                break;
+            }
+            tokens.push(token);
+        }
+        tokens
+    }
+
+    fn new_token(&mut self, t: ByteStr<'t>, k: TKind) -> Token<'t> {
         let token = Token {
             text: t,
             kind: k,
             file_name: self.file_name,
             line_number: self.line_number,
             has_space: self.has_space,
+            start_of_line: self.start_of_line,
         };
         self.has_space = false;
         self.start_of_line = false;
         token
     }
 
-    pub fn tokenize<'a>(&'a mut self) -> Vec<Token<'t>> {
+    fn next_token(&mut self) -> Token<'t> {
         let mut text = self.full_text;
-        let mut tokens = Vec::with_capacity(text.len() / 5);
 
-        'tokens: while !text.is_empty() {
+        while !text.is_empty() {
             let byte = text[0];
 
             // Skip whitespace
@@ -208,16 +223,18 @@ impl<'t> Tokenizer<'t> {
             {
                 let (num_str, rest) = slice_number_literal(text);
                 text = rest;
-                tokens.push(self.new_token(num_str, TKind::Number));
-                continue;
+
+                self.full_text = text;
+                return self.new_token(num_str, TKind::Number);
             }
 
             // Parse char literal
             if byte == b'\'' {
                 let (string, rest) = slice_char_literal(text);
                 text = rest;
-                tokens.push(self.new_token(string, TKind::Char));
-                continue;
+
+                self.full_text = text;
+                return self.new_token(string, TKind::Char);
             }
 
             // Parse string literal
@@ -229,8 +246,9 @@ impl<'t> Tokenizer<'t> {
             {
                 let (string, rest) = slice_string_literal(text);
                 text = rest;
-                tokens.push(self.new_token(string, TKind::String));
-                continue;
+
+                self.full_text = text;
+                return self.new_token(string, TKind::String);
             }
 
             // Parse punctuation
@@ -238,8 +256,9 @@ impl<'t> Tokenizer<'t> {
                 if text.starts_with(token.0) {
                     let (p_str, rest) = text.0.split_at(token.0.len());
                     text = rest.into();
-                    tokens.push(self.new_token(p_str.into(), token.1));
-                    continue 'tokens;
+
+                    self.full_text = text;
+                    return self.new_token(p_str.into(), token.1);
                 }
             }
 
@@ -265,9 +284,13 @@ impl<'t> Tokenizer<'t> {
                     break;
                 }
             }
-            tokens.push(self.new_token(ident, ident_kind));
+
+            self.full_text = text;
+            return self.new_token(ident, ident_kind);
         }
-        tokens
+
+        self.full_text = text;
+        self.new_token(text, TKind::EndOfFile)
     }
 }
 
