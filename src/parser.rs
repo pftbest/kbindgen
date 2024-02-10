@@ -32,20 +32,36 @@ struct Node<'t> {
     ends_with_semicolon: bool,
 }
 
+impl<'t> Node<'t> {
+    pub fn new(kind: NodeKind, token: TRef<'t>) -> Self {
+        Self {
+            kind,
+            token,
+            items: Vec::new(),
+            ends_with_semicolon: false,
+        }
+    }
+
+    pub fn new_nested(kind: NodeKind, token: TRef<'t>, item: Self) -> Self {
+        Self {
+            kind,
+            token,
+            items: vec![item],
+            ends_with_semicolon: false,
+        }
+    }
+}
+
 fn parse_group(mut tokens: TList) -> TResult<Node> {
-    let mut list = Vec::new();
-    let mut group = Vec::new();
+    let mut list = Node::new(NodeKind::Group, &tokens[0]);
+    let mut group = Node::new(NodeKind::Group, &tokens[0]);
     while !tokens.is_empty() {
         match tokens[0].kind {
             TKind::Semicolon => {
-                list.push(Node {
-                    kind: NodeKind::Group,
-                    token: &tokens[0],
-                    items: group,
-                    ends_with_semicolon: true,
-                });
-                group = Vec::new();
+                group.ends_with_semicolon = true;
+                list.items.push(group);
                 tokens = &tokens[1..];
+                group = Node::new(NodeKind::Group, &tokens[0]);
                 continue;
             }
             TKind::OpenBrace => {
@@ -53,25 +69,20 @@ fn parse_group(mut tokens: TList) -> TResult<Node> {
                 if rest[0].kind != TKind::CloseBrace {
                     return make_error(&rest[0], "expected '}'");
                 }
+                let node = Node::new_nested(NodeKind::Braces, &tokens[0], node);
                 tokens = &rest[1..];
-                group.push(Node {
-                    kind: NodeKind::Braces,
-                    token: &rest[0],
-                    items: vec![node],
-                    ends_with_semicolon: false,
-                });
 
                 // Check for a case where open brace follows closed paren "){"
                 // It should end the current group after the braces
                 // This happens in the function definitions and in control flow blocks
-                if group.len() > 1 && group[group.len() - 2].kind == NodeKind::Parens {
-                    list.push(Node {
-                        kind: NodeKind::Group,
-                        token: &rest[0],
-                        items: group,
-                        ends_with_semicolon: false,
-                    });
-                    group = Vec::new();
+                let has_parens = match group.items.last() {
+                    Some(ref n) if n.kind == NodeKind::Parens => true,
+                    _ => false,
+                };
+                group.items.push(node);
+                if has_parens {
+                    list.items.push(group);
+                    group = Node::new(NodeKind::Group, &tokens[0]);
                 }
             }
             TKind::OpenParen => {
@@ -79,64 +90,40 @@ fn parse_group(mut tokens: TList) -> TResult<Node> {
                 if rest[0].kind != TKind::CloseParen {
                     return make_error(&tokens[0], "expected ')'");
                 }
+                let node = Node::new_nested(NodeKind::Parens, &tokens[0], node);
                 tokens = &rest[1..];
-                group.push(Node {
-                    kind: NodeKind::Parens,
-                    token: &rest[0],
-                    items: vec![node],
-                    ends_with_semicolon: false,
-                });
+                group.items.push(node);
             }
             TKind::OpenBracket => {
                 let (rest, node) = parse_group(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseBracket {
                     return make_error(&tokens[0], "expected ']'");
                 }
+                let node = Node::new_nested(NodeKind::Brackets, &tokens[0], node);
                 tokens = &rest[1..];
-                group.push(Node {
-                    kind: NodeKind::Brackets,
-                    token: &rest[0],
-                    items: vec![node],
-                    ends_with_semicolon: false,
-                });
+                group.items.push(node);
             }
             TKind::CloseBrace | TKind::CloseParen | TKind::CloseBracket | TKind::EndOfFile => {
                 break;
             }
             _ => {
-                group.push(Node {
-                    kind: NodeKind::Token,
-                    token: &tokens[0],
-                    items: Vec::new(),
-                    ends_with_semicolon: false,
-                });
+                let node = Node::new(NodeKind::Token, &tokens[0]);
+                group.items.push(node);
                 tokens = &tokens[1..];
             }
         }
     }
 
-    if !group.is_empty() {
-        let node = Node {
-            kind: NodeKind::Group,
-            token: &tokens[0],
-            items: group,
-            ends_with_semicolon: false,
-        };
+    if !group.items.is_empty() {
         // Shortcut to avoid nested groups of size 1
-        if list.is_empty() {
-            return Ok((tokens, node));
+        if list.items.is_empty() {
+            return Ok((tokens, group));
         } else {
-            list.push(node);
+            list.items.push(group);
         }
     }
 
-    let node = Node {
-        kind: NodeKind::Group,
-        token: &tokens[0],
-        items: list,
-        ends_with_semicolon: false,
-    };
-    Ok((tokens, node))
+    Ok((tokens, list))
 }
 
 pub struct Parser {}
