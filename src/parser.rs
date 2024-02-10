@@ -1,210 +1,16 @@
-#![allow(dead_code)]
-
 use crate::tokenizer::{TKind, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TErrorKind {
+enum TError {
     UnexpectedToken,
     UnbalancedParens,
+    UnbalancedBraces,
+    UnbalancedBrackets,
 }
 
-#[derive(Debug)]
-struct TError<'t> {
-    tokens: TList<'t>,
-    kind: TErrorKind,
-}
-
-type TRef<'t> = &'t Token<'t>;
+//type TRef<'t> = &'t Token<'t>;
 type TList<'t> = &'t [Token<'t>];
-type TResult<'t, O> = Result<(TList<'t>, O), TError<'t>>;
-
-fn make_error<O>(tokens: TList, kind: TErrorKind) -> TResult<O> {
-    Err(TError { tokens, kind })
-}
-
-fn kind(tokens: TList, kind: TKind) -> TResult<TRef> {
-    let token = &tokens[0];
-    if token.kind != kind {
-        return make_error(tokens, TErrorKind::UnexpectedToken);
-    }
-    Ok((&tokens[1..], token))
-}
-
-fn parens<'t, F, O>(tokens: TList<'t>, mut f: F) -> TResult<O>
-where
-    F: FnMut(TList<'t>) -> TResult<O>,
-{
-    let (tokens, _) = kind(tokens, TKind::OpenParen)?;
-    let (tokens, o2) = f(tokens)?;
-    let (tokens, _) = kind(tokens, TKind::CloseParen)?;
-    Ok((tokens, o2))
-}
-
-fn braces<'t, F, O>(tokens: TList<'t>, mut f: F) -> TResult<O>
-where
-    F: FnMut(TList<'t>) -> TResult<O>,
-{
-    let (tokens, _) = kind(tokens, TKind::OpenBrace)?;
-    let (tokens, o2) = f(tokens)?;
-    let (tokens, _) = kind(tokens, TKind::CloseBrace)?;
-    Ok((tokens, o2))
-}
-
-fn comma_list<'t, F, O>(tokens: TList<'t>, mut f: F) -> TResult<Vec<O>>
-where
-    F: FnMut(TList<'t>) -> TResult<O>,
-{
-    let (tokens, out) = f(tokens)?;
-    let mut rest = tokens;
-    let mut list = Vec::new();
-    list.push(out);
-    while let Ok((tokens, _)) = kind(rest, TKind::Comma) {
-        if let Ok((tokens, out)) = f(tokens) {
-            rest = tokens;
-            list.push(out);
-        } else {
-            rest = tokens;
-            break;
-        }
-    }
-    Ok((rest, list))
-}
-
-fn many_list<'t, F, O>(tokens: TList<'t>, mut f: F) -> TResult<Vec<O>>
-where
-    F: FnMut(TList<'t>) -> TResult<O>,
-{
-    let mut rest = tokens;
-    let mut list = Vec::new();
-    while let Ok((tokens, out)) = f(rest) {
-        rest = tokens;
-        list.push(out);
-    }
-    Ok((rest, list))
-}
-
-fn balanced_parens(tokens: TList) -> TResult<TList> {
-    if tokens[0].kind != TKind::OpenParen {
-        return make_error(tokens, TErrorKind::UnexpectedToken);
-    }
-    let mut depth = 1;
-    for i in 1..tokens.len() {
-        let t = &tokens[i];
-        if t.kind == TKind::OpenParen {
-            depth += 1;
-        } else if t.kind == TKind::CloseParen {
-            depth -= 1;
-            if depth == 0 {
-                let (out, rest) = tokens.split_at(i);
-                return Ok((&rest[1..], &out[1..]));
-            }
-        }
-    }
-    make_error(tokens, TErrorKind::UnbalancedParens)
-}
-
-fn parse_attribute_name(tokens: TList) -> TResult<TypeAttribute> {
-    let (tokens, name) = kind(tokens, TKind::Ident)?;
-    let mut tokens = tokens;
-    let mut args: TList = &[];
-    if let Ok((rest, out)) = balanced_parens(tokens) {
-        tokens = rest;
-        args = out;
-    }
-    Ok((tokens, TypeAttribute { name, args }))
-}
-
-fn parse_attribute(tokens: TList) -> TResult<Vec<TypeAttribute>> {
-    let (tokens, _) = kind(tokens, TKind::Attribute)?;
-    parens(tokens, |tokens| {
-        parens(tokens, |tokens| {
-            comma_list(tokens, |tokens| parse_attribute_name(tokens))
-        })
-    })
-}
-
-#[derive(Debug)]
-struct TypeAttribute<'t> {
-    name: TRef<'t>,
-    args: TList<'t>,
-}
-
-// #[derive(Debug)]
-// struct SomeEnumMember<'t> {
-//     name: TRef<'t>,
-//     value: TList<'t>,
-// }
-
-// #[derive(Debug)]
-// enum SomeType<'t> {
-//     StructName {
-//         name: TRef<'t>,
-//     },
-//     Struct {
-//         name: Option<TRef<'t>>,
-//         members: Vec<SomeTypeDecl<'t>>,
-//     },
-//     EnumName {
-//         name: TRef<'t>,
-//     },
-//     Enum {
-//         name: Option<TRef<'t>>,
-//         members: Vec<SomeEnumMember<'t>>,
-//     },
-//     Primitive {
-//         parts: Vec<TRef<'t>>,
-//     },
-//     Function {
-//         ret: Box<SomeType<'t>>,
-//         args: Vec<SomeTypeDecl<'t>>,
-//     },
-//     Pointer {
-//         base: Box<SomeType<'t>>,
-//     },
-// }
-
-// #[derive(Debug)]
-// struct SomeTypeDecl<'t> {
-//     name: ByteStr<'t>,
-//     attributes: Vec<TypeAttribute<'t>>,
-//     decl_type: SomeType<'t>,
-// }
-
-// fn parse_struct_member(tokens: TList) -> TResult<SomeTypeDecl> {
-//     print_tokens(&tokens[..5]);
-//     todo!()
-// }
-
-// fn parse_struct(tokens: TList) -> TResult<SomeType> {
-//     let (tokens, _) = kind(tokens, TKind::Struct)?;
-//     let mut tokens = tokens;
-//     let mut name = None;
-//     if let Ok((rest, n)) = kind(tokens, TKind::Ident) {
-//         name = Some(n);
-//         tokens = rest;
-//     }
-//     let (tokens, members) = braces(tokens, |tokens| {
-//         many_list(tokens, |tokens| parse_struct_member(tokens))
-//     })?;
-//     Ok((tokens, SomeType::Struct { name, members }))
-// }
-
-// fn parse_type(tokens: TList) -> TResult<SomeType> {
-//     match tokens[0].kind {
-//         TKind::Struct => {
-//             return parse_struct(tokens);
-//         }
-//         _ => {
-//             todo!();
-//         }
-//     }
-//     todo!()
-// }
-
-// fn parse_type_decl(tokens: TList) -> TResult<SomeTypeDecl> {
-//     let (tokens, tt) = parse_type(tokens)?;
-//     todo!()
-// }
+type TResult<'t, O> = Result<(TList<'t>, O), TError>;
 
 #[derive(Debug)]
 enum Node<'t> {
@@ -251,18 +57,16 @@ fn parse_node(tokens: TList) -> TResult<Node> {
         }
         match tokens[0].kind {
             TKind::Semicolon => {
-                //if !group.is_empty() {
-                    semi.push(Node::Group(group));
-                    group = Vec::new();
-                    has_semicolon = true;
-                //}
+                semi.push(Node::Group(group));
+                group = Vec::new();
+                has_semicolon = true;
                 tokens = &tokens[1..];
                 continue;
             }
             TKind::OpenBrace => {
                 let (rest, node) = parse_node(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseBrace {
-                    return make_error(rest, TErrorKind::UnexpectedToken);
+                    return Err(TError::UnbalancedBraces);
                 }
                 tokens = &rest[1..];
                 group.push(Node::Braces(Box::new(node)));
@@ -274,7 +78,7 @@ fn parse_node(tokens: TList) -> TResult<Node> {
             TKind::OpenParen => {
                 let (rest, node) = parse_node(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseParen {
-                    return make_error(rest, TErrorKind::UnexpectedToken);
+                    return Err(TError::UnbalancedParens);
                 }
                 tokens = &rest[1..];
                 group.push(Node::Parens(Box::new(node)));
@@ -282,7 +86,7 @@ fn parse_node(tokens: TList) -> TResult<Node> {
             TKind::OpenBracket => {
                 let (rest, node) = parse_node(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseBracket {
-                    return make_error(rest, TErrorKind::UnexpectedToken);
+                    return Err(TError::UnbalancedBrackets);
                 }
                 tokens = &rest[1..];
                 group.push(Node::Brackets(Box::new(node)));
@@ -291,7 +95,7 @@ fn parse_node(tokens: TList) -> TResult<Node> {
                 break;
             }
             _ => {
-                return make_error(tokens, TErrorKind::UnexpectedToken);
+                return Err(TError::UnexpectedToken);
             }
         }
     }
@@ -335,18 +139,18 @@ fn print_node(node: &Node) {
             print!("(");
             print_node(n);
             print!(")");
-        },
+        }
         Node::Braces(ref n) => {
             //print!("{{...}}")
             println!("\n{{");
             print_node(n);
             print!("\n}}");
-        },
+        }
         Node::Brackets(ref n) => {
             print!("[");
             print_node(n);
             print!("]");
-        },
+        }
         Node::Group(ref list) => {
             for n in list {
                 print_node(n);
@@ -408,28 +212,28 @@ fn print_tokens(tokens: TList, multiline: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tokenizer::Tokenizer;
-    use crate::utils::ByteStr;
+    // use super::*;
+    // use crate::tokenizer::Tokenizer;
+    // use crate::utils::ByteStr;
 
-    #[test]
-    fn test_attributes() {
-        let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed(5),))"));
-        let tokens = tokenizer.tokenize();
-        let (rest, attrs) = parse_attribute(&tokens).unwrap();
-        assert_eq!(attrs.len(), 1);
-        assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
-        assert_eq!(attrs[0].args.len(), 1);
-        assert_eq!(rest[0].kind, TKind::EndOfFile);
+    // #[test]
+    // fn test_attributes() {
+    //     let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed(5),))"));
+    //     let tokens = tokenizer.tokenize();
+    //     let (rest, attrs) = parse_attribute(&tokens).unwrap();
+    //     assert_eq!(attrs.len(), 1);
+    //     assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
+    //     assert_eq!(attrs[0].args.len(), 1);
+    //     assert_eq!(rest[0].kind, TKind::EndOfFile);
 
-        let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed,aligned(4)))"));
-        let tokens = tokenizer.tokenize();
-        let (rest, attrs) = parse_attribute(&tokens).unwrap();
-        assert_eq!(attrs.len(), 2);
-        assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
-        assert_eq!(attrs[0].args.len(), 0);
-        assert_eq!(attrs[1].name.text, ByteStr(b"aligned"));
-        assert_eq!(attrs[1].args.len(), 1);
-        assert_eq!(rest[0].kind, TKind::EndOfFile);
-    }
+    //     let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed,aligned(4)))"));
+    //     let tokens = tokenizer.tokenize();
+    //     let (rest, attrs) = parse_attribute(&tokens).unwrap();
+    //     assert_eq!(attrs.len(), 2);
+    //     assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
+    //     assert_eq!(attrs[0].args.len(), 0);
+    //     assert_eq!(attrs[1].name.text, ByteStr(b"aligned"));
+    //     assert_eq!(attrs[1].args.len(), 1);
+    //     assert_eq!(rest[0].kind, TKind::EndOfFile);
+    // }
 }
