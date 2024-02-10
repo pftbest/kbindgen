@@ -4,75 +4,70 @@ use crate::tokenizer::{TKind, Token};
 #[derive(Debug)]
 struct TError<'t> {
     token: TRef<'t>,
-    expected: TKind,
+    message: &'t str,
 }
 
 type TRef<'t> = &'t Token<'t>;
 type TList<'t> = &'t [Token<'t>];
 type TResult<'t, O> = Result<(TList<'t>, O), TError<'t>>;
 
-fn make_error<O>(token: TRef, expected: TKind) -> TResult<O> {
-    Err(TError { token, expected })
+fn make_error<'t, O>(token: TRef<'t>, message: &'t str) -> TResult<'t, O> {
+    Err(TError { token, message })
 }
 
-enum Node<'t> {
-    Token(TRef<'t>),
-    Parens(Box<Node<'t>>),
-    Braces(Box<Node<'t>>),
-    Brackets(Box<Node<'t>>),
-    Group {
-        items: Vec<Node<'t>>,
-        ends_with_semicolon: bool,
-    },
-    StatementList(Vec<Node<'t>>),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    Token,
+    Parens,
+    Braces,
+    Brackets,
+    Group,
 }
 
-impl<'t> std::fmt::Debug for Node<'t> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Token(arg0) => f.debug_tuple("Token").field(&arg0.text).finish(),
-            Self::Parens(arg0) => f.debug_tuple("Parens").field(arg0).finish(),
-            Self::Braces(arg0) => f.debug_tuple("Braces").field(arg0).finish(),
-            Self::Brackets(arg0) => f.debug_tuple("Brackets").field(arg0).finish(),
-            Self::Group {
-                items,
-                ends_with_semicolon,
-            } => f
-                .debug_struct("Group")
-                .field("items", items)
-                .field("ends_with_semicolon", ends_with_semicolon)
-                .finish(),
-            Self::StatementList(arg0) => f.debug_tuple("StatementList").field(arg0).finish(),
-        }
-    }
+#[derive(Debug)]
+struct Node<'t> {
+    kind: NodeKind,
+    token: TRef<'t>,
+    items: Vec<Node<'t>>,
+    ends_with_semicolon: bool,
 }
 
-fn parse_node(tokens: TList) -> TResult<Node> {
-    let mut semi = Vec::new();
+fn parse_group(mut tokens: TList) -> TResult<Node> {
+    let mut list = Vec::new();
     let mut group = Vec::new();
-    let mut tokens = tokens;
-    let mut found_semicolon = false;
     while !tokens.is_empty() {
         match tokens[0].kind {
             TKind::Semicolon => {
-                semi.push(Node::Group {
+                list.push(Node {
+                    kind: NodeKind::Group,
+                    token: &tokens[0],
                     items: group,
                     ends_with_semicolon: true,
                 });
                 group = Vec::new();
-                found_semicolon = true;
                 tokens = &tokens[1..];
                 continue;
             }
             TKind::OpenBrace => {
-                let (rest, node) = parse_node(&tokens[1..])?;
+                let (rest, node) = parse_group(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseBrace {
-                    return make_error(&tokens[0], TKind::CloseBrace);
+                    return make_error(&rest[0], "expected '}'");
                 }
                 tokens = &rest[1..];
-                group.push(Node::Braces(Box::new(node)));
-                if group.len() > 1 && matches!(group[group.len() - 2], Node::Parens(_)) {
-                    semi.push(Node::Group {
+                group.push(Node {
+                    kind: NodeKind::Braces,
+                    token: &rest[0],
+                    items: vec![node],
+                    ends_with_semicolon: false,
+                });
+
+                // Check for a case where open brace follows closed paren "){"
+                // It should end the current group after the braces
+                // This happens in the function definitions and in control flow blocks
+                if group.len() > 1 && group[group.len() - 2].kind == NodeKind::Parens {
+                    list.push(Node {
+                        kind: NodeKind::Group,
+                        token: &rest[0],
                         items: group,
                         ends_with_semicolon: false,
                     });
@@ -80,44 +75,68 @@ fn parse_node(tokens: TList) -> TResult<Node> {
                 }
             }
             TKind::OpenParen => {
-                let (rest, node) = parse_node(&tokens[1..])?;
+                let (rest, node) = parse_group(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseParen {
-                    return make_error(&tokens[0], TKind::CloseParen);
+                    return make_error(&tokens[0], "expected ')'");
                 }
                 tokens = &rest[1..];
-                group.push(Node::Parens(Box::new(node)));
+                group.push(Node {
+                    kind: NodeKind::Parens,
+                    token: &rest[0],
+                    items: vec![node],
+                    ends_with_semicolon: false,
+                });
             }
             TKind::OpenBracket => {
-                let (rest, node) = parse_node(&tokens[1..])?;
+                let (rest, node) = parse_group(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseBracket {
-                    return make_error(&tokens[0], TKind::CloseBracket);
+                    return make_error(&tokens[0], "expected ']'");
                 }
                 tokens = &rest[1..];
-                group.push(Node::Brackets(Box::new(node)));
+                group.push(Node {
+                    kind: NodeKind::Brackets,
+                    token: &rest[0],
+                    items: vec![node],
+                    ends_with_semicolon: false,
+                });
             }
             TKind::CloseBrace | TKind::CloseParen | TKind::CloseBracket | TKind::EndOfFile => {
                 break;
             }
             _ => {
-                group.push(Node::Token(&tokens[0]));
+                group.push(Node {
+                    kind: NodeKind::Token,
+                    token: &tokens[0],
+                    items: Vec::new(),
+                    ends_with_semicolon: false,
+                });
                 tokens = &tokens[1..];
             }
         }
     }
 
     if !group.is_empty() {
-        semi.push(Node::Group {
+        let node = Node {
+            kind: NodeKind::Group,
+            token: &tokens[0],
             items: group,
             ends_with_semicolon: false,
-        });
+        };
+        // Shortcut to avoid nested groups of size 1
+        if list.is_empty() {
+            return Ok((tokens, node));
+        } else {
+            list.push(node);
+        }
     }
 
-    if semi.len() == 1 && !found_semicolon {
-        let node = semi.pop().unwrap();
-        Ok((tokens, node))
-    } else {
-        Ok((tokens, Node::StatementList(semi)))
-    }
+    let node = Node {
+        kind: NodeKind::Group,
+        token: &tokens[0],
+        items: list,
+        ends_with_semicolon: false,
+    };
+    Ok((tokens, node))
 }
 
 pub struct Parser {}
@@ -127,35 +146,35 @@ impl Parser {
         Self {}
     }
 
-    fn parse_declaration(&mut self, node: &mut Node) {
-        match node {
-            &mut Node::Group {
-                ref mut items,
-                ends_with_semicolon,
-            } => {
+    // fn parse_declaration(&mut self, node: &mut Node) {
+    //     match node {
+    //         &mut Node::Group {
+    //             ref mut items,
+    //             ends_with_semicolon,
+    //         } => {
 
-            },
-            _ => {
-                panic!("Top level declaration should be a group");
-            },
-        }
-    }
+    //         },
+    //         _ => {
+    //             panic!("Top level declaration should be a group");
+    //         },
+    //     }
+    // }
 
-    fn parse_top_level(&mut self, root_node: &mut Node) {
-        match root_node {
-            &mut Node::StatementList(ref mut list) => {
-                for statement in list.iter_mut() {
-                    self.parse_declaration(statement);
-                }
-            },
-            _ => {
-                panic!("Top level should be a list");
-            },
-        }
+    fn parse_top_level(&mut self, _root_node: &mut Node) {
+        //     match root_node {
+        //         &mut Node::StatementList(ref mut list) => {
+        //             for statement in list.iter_mut() {
+        //                 self.parse_declaration(statement);
+        //             }
+        //         },
+        //         _ => {
+        //             panic!("Top level should be a list");
+        //         },
+        //     }
     }
 
     pub fn parse(&mut self, tokens: TList) {
-        let (rest, mut node) = parse_node(tokens).unwrap();
+        let (rest, mut node) = parse_group(tokens).unwrap();
         assert_eq!(rest[0].kind, TKind::EndOfFile);
 
         let mut out = String::new();
@@ -172,45 +191,28 @@ impl Parser {
 }
 
 fn print_node(node: &Node, out: &mut String) {
-    match node {
-        Node::Token(token) => print_token(token, out),
-        Node::Parens(ref n) => {
+    match node.kind {
+        NodeKind::Token => print_token(node.token, out),
+        NodeKind::Parens => {
             out.push('(');
-            print_node(n, out);
+            print_node(&node.items[0], out);
             out.push(')');
         }
-        Node::Braces(ref n) => {
+        NodeKind::Braces => {
             out.push_str("\n{\n");
-            print_node(n, out);
-            out.push_str("\n}");
+            print_node(&node.items[0], out);
+            out.push_str("\n}\n");
         }
-        Node::Brackets(ref n) => {
+        NodeKind::Brackets => {
             out.push('[');
-            print_node(n, out);
+            print_node(&node.items[0], out);
             out.push(']');
         }
-        Node::Group { ref items, .. } => {
-            for n in items {
+        NodeKind::Group => {
+            for n in &node.items {
                 print_node(n, out);
-            }
-        }
-        Node::StatementList(ref list) => {
-            for n in list {
-                print_node(n, out);
-                match n {
-                    &Node::Group {
-                        ends_with_semicolon,
-                        ..
-                    } => {
-                        if !ends_with_semicolon {
-                            out.push('\n');
-                        } else {
-                            out.push_str(";\n");
-                        }
-                    }
-                    _ => {
-                        panic!("StatementList should only have groups inside");
-                    }
+                if n.ends_with_semicolon {
+                    out.push_str(";\n");
                 }
             }
         }
