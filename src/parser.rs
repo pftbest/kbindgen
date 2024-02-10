@@ -1,84 +1,88 @@
 use crate::tokenizer::{TKind, Token};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TError {
-    UnexpectedToken,
-    UnbalancedParens,
-    UnbalancedBraces,
-    UnbalancedBrackets,
+#[allow(dead_code)]
+#[derive(Debug)]
+struct TError<'t> {
+    token: TRef<'t>,
+    expected: TKind,
 }
 
-//type TRef<'t> = &'t Token<'t>;
+type TRef<'t> = &'t Token<'t>;
 type TList<'t> = &'t [Token<'t>];
-type TResult<'t, O> = Result<(TList<'t>, O), TError>;
+type TResult<'t, O> = Result<(TList<'t>, O), TError<'t>>;
 
-#[derive(Debug)]
+fn make_error<O>(token: TRef, expected: TKind) -> TResult<O> {
+    Err(TError { token, expected })
+}
+
 enum Node<'t> {
-    Tokens(TList<'t>),
+    Token(TRef<'t>),
     Parens(Box<Node<'t>>),
     Braces(Box<Node<'t>>),
     Brackets(Box<Node<'t>>),
-    Group(Vec<Node<'t>>),
-    Function(Vec<Node<'t>>),
-    SemicolonList(Vec<Node<'t>>),
+    Group {
+        items: Vec<Node<'t>>,
+        ends_with_semicolon: bool,
+    },
+    StatementList(Vec<Node<'t>>),
 }
 
-fn simple_tokens(tokens: TList) -> TResult<TList> {
-    for i in 0..tokens.len() {
-        match tokens[i].kind {
-            TKind::Semicolon
-            | TKind::OpenBrace
-            | TKind::CloseBrace
-            | TKind::OpenParen
-            | TKind::CloseParen
-            | TKind::OpenBracket
-            | TKind::CloseBracket
-            | TKind::EndOfFile => {
-                let (start, end) = tokens.split_at(i);
-                return Ok((end, start));
-            }
-            _ => {}
+impl<'t> std::fmt::Debug for Node<'t> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Token(arg0) => f.debug_tuple("Token").field(&arg0.text).finish(),
+            Self::Parens(arg0) => f.debug_tuple("Parens").field(arg0).finish(),
+            Self::Braces(arg0) => f.debug_tuple("Braces").field(arg0).finish(),
+            Self::Brackets(arg0) => f.debug_tuple("Brackets").field(arg0).finish(),
+            Self::Group {
+                items,
+                ends_with_semicolon,
+            } => f
+                .debug_struct("Group")
+                .field("items", items)
+                .field("ends_with_semicolon", ends_with_semicolon)
+                .finish(),
+            Self::StatementList(arg0) => f.debug_tuple("StatementList").field(arg0).finish(),
         }
     }
-    Ok((&tokens[tokens.len()..], tokens))
 }
 
 fn parse_node(tokens: TList) -> TResult<Node> {
     let mut semi = Vec::new();
     let mut group = Vec::new();
     let mut tokens = tokens;
-    let mut has_semicolon = false;
+    let mut found_semicolon = false;
     while !tokens.is_empty() {
-        let (rest, simple) = simple_tokens(tokens)?;
-        if !simple.is_empty() {
-            tokens = rest;
-            group.push(Node::Tokens(simple));
-            continue;
-        }
         match tokens[0].kind {
             TKind::Semicolon => {
-                semi.push(Node::Group(group));
+                semi.push(Node::Group {
+                    items: group,
+                    ends_with_semicolon: true,
+                });
                 group = Vec::new();
-                has_semicolon = true;
+                found_semicolon = true;
                 tokens = &tokens[1..];
                 continue;
             }
             TKind::OpenBrace => {
                 let (rest, node) = parse_node(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseBrace {
-                    return Err(TError::UnbalancedBraces);
+                    return make_error(&tokens[0], TKind::CloseBrace);
                 }
                 tokens = &rest[1..];
                 group.push(Node::Braces(Box::new(node)));
                 if group.len() > 1 && matches!(group[group.len() - 2], Node::Parens(_)) {
-                    semi.push(Node::Function(group));
+                    semi.push(Node::Group {
+                        items: group,
+                        ends_with_semicolon: false,
+                    });
                     group = Vec::new();
                 }
             }
             TKind::OpenParen => {
                 let (rest, node) = parse_node(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseParen {
-                    return Err(TError::UnbalancedParens);
+                    return make_error(&tokens[0], TKind::CloseParen);
                 }
                 tokens = &rest[1..];
                 group.push(Node::Parens(Box::new(node)));
@@ -86,7 +90,7 @@ fn parse_node(tokens: TList) -> TResult<Node> {
             TKind::OpenBracket => {
                 let (rest, node) = parse_node(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseBracket {
-                    return Err(TError::UnbalancedBrackets);
+                    return make_error(&tokens[0], TKind::CloseBracket);
                 }
                 tokens = &rest[1..];
                 group.push(Node::Brackets(Box::new(node)));
@@ -95,25 +99,24 @@ fn parse_node(tokens: TList) -> TResult<Node> {
                 break;
             }
             _ => {
-                return Err(TError::UnexpectedToken);
+                group.push(Node::Token(&tokens[0]));
+                tokens = &tokens[1..];
             }
         }
     }
 
     if !group.is_empty() {
-        let node = if group.len() == 1 {
-            group.pop().unwrap()
-        } else {
-            Node::Group(group)
-        };
-        semi.push(node);
+        semi.push(Node::Group {
+            items: group,
+            ends_with_semicolon: false,
+        });
     }
 
-    if semi.len() == 1 && !has_semicolon {
+    if semi.len() == 1 && !found_semicolon {
         let node = semi.pop().unwrap();
         Ok((tokens, node))
     } else {
-        Ok((tokens, Node::SemicolonList(semi)))
+        Ok((tokens, Node::StatementList(semi)))
     }
 }
 
@@ -128,85 +131,80 @@ impl Parser {
         let (rest, node) = parse_node(tokens).unwrap();
         assert_eq!(rest[0].kind, TKind::EndOfFile);
         //println!("{:#?}", node);
-        print_node(&node);
+        let mut out = String::new();
+        print_node(&node, &mut out);
+        std::fs::write("out.c", &out).unwrap();
+        out.clear();
+        use std::fmt::Write;
+        writeln!(&mut out, "{:#?}", node).unwrap();
+        std::fs::write("out.txt", &out).unwrap();
     }
 }
 
-fn print_node(node: &Node) {
+fn print_node(node: &Node, out: &mut String) {
     match node {
-        Node::Tokens(tokens) => print_tokens(tokens, false),
+        Node::Token(token) => print_token(token, out),
         Node::Parens(ref n) => {
-            print!("(");
-            print_node(n);
-            print!(")");
+            out.push('(');
+            print_node(n, out);
+            out.push(')');
         }
         Node::Braces(ref n) => {
-            //print!("{{...}}")
-            println!("\n{{");
-            print_node(n);
-            print!("\n}}");
+            out.push_str("\n{\n");
+            print_node(n, out);
+            out.push_str("\n}");
         }
         Node::Brackets(ref n) => {
-            print!("[");
-            print_node(n);
-            print!("]");
+            out.push('[');
+            print_node(n, out);
+            out.push(']');
         }
-        Node::Group(ref list) => {
-            for n in list {
-                print_node(n);
+        Node::Group { ref items, .. } => {
+            for n in items {
+                print_node(n, out);
             }
         }
-        Node::Function(ref list) => {
-            println!();
+        Node::StatementList(ref list) => {
             for n in list {
-                print_node(n);
-            }
-            println!();
-        }
-        Node::SemicolonList(ref list) => {
-            for n in list {
-                print_node(n);
-                if matches!(n, Node::Function(_)) {
-                    println!();
-                } else {
-                    println!(";");
+                print_node(n, out);
+                match n {
+                    &Node::Group {
+                        ends_with_semicolon,
+                        ..
+                    } => {
+                        if !ends_with_semicolon {
+                            out.push('\n');
+                        } else {
+                            out.push_str(";\n");
+                        }
+                    }
+                    _ => {
+                        panic!("StatementList should only have groups inside");
+                    }
                 }
             }
         }
     }
 }
 
-fn print_tokens(tokens: TList, multiline: bool) {
-    if multiline {
-        println!("------------------------------------");
+fn print_token(token: TRef, out: &mut String) {
+    if token.has_space || token.start_of_line {
+        out.push(' ');
     }
-    let mut end_line = false;
-    for t in tokens {
-        let mut s = String::from_utf8_lossy(t.text.0).into_owned();
-        if t.kind == TKind::String {
-            s = format!("\"{}\"", s);
-        } else if t.kind == TKind::Char {
-            s = format!("'{}'", s);
-        }
-        if t.has_space || t.start_of_line {
-            print!(" {}", s);
-            end_line = true;
-        } else {
-            print!("{}", s);
-            end_line = true;
-        }
-        if t.kind == TKind::Semicolon || t.kind == TKind::OpenBrace {
-            if multiline {
-                println!();
-            }
-            end_line = false;
-        }
+
+    if token.kind == TKind::String {
+        out.push('\"');
+    } else if token.kind == TKind::Char {
+        out.push('\'');
     }
-    if multiline {
-        if end_line {
-            println!()
-        }
-        println!("------------------------------------");
+
+    let text = String::from_utf8_lossy(token.text.0);
+    out.push_str(&text);
+
+    if token.kind == TKind::String {
+        out.push('\"');
+    } else if token.kind == TKind::Char {
+        out.push('\'');
     }
 }
 
