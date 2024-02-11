@@ -28,10 +28,10 @@ pub enum NodeKind {
     Braces,
     Brackets,
     Group,
+    // Second pass nodes
     Struct,
     Union,
     Enum,
-    // Second pass nodes
     Typedef,
     FunctionDef,
 }
@@ -45,6 +45,7 @@ struct Node<'t> {
     has_comma: bool,
     has_assignment: bool,
     has_typedef: bool,
+    name: Option<TRef<'t>>,
 }
 
 impl<'t> Node<'t> {
@@ -57,18 +58,7 @@ impl<'t> Node<'t> {
             has_comma: false,
             has_assignment: false,
             has_typedef: false,
-        }
-    }
-
-    pub fn new_nested(kind: NodeKind, token: TRef<'t>, item: Self) -> Self {
-        Self {
-            kind,
-            token,
-            items: vec![item],
-            ends_with_semicolon: false,
-            has_comma: false,
-            has_assignment: false,
-            has_typedef: false,
+            name: None,
         }
     }
 
@@ -94,11 +84,12 @@ fn parse_group(mut tokens: TList) -> TResult<Node> {
                 continue;
             }
             TKind::OpenBrace => {
-                let (rest, node) = parse_group(&tokens[1..])?;
+                let (rest, mut node) = parse_group(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseBrace {
                     return make_error(&rest[0], "expected '}'");
                 }
-                let node = Node::new_nested(NodeKind::Braces, &tokens[0], node);
+                assert_eq!(node.kind, NodeKind::Group);
+                node.kind = NodeKind::Braces;
                 tokens = &rest[1..];
 
                 // Check for a case where open brace follows closed paren "){"
@@ -115,20 +106,22 @@ fn parse_group(mut tokens: TList) -> TResult<Node> {
                 }
             }
             TKind::OpenParen => {
-                let (rest, node) = parse_group(&tokens[1..])?;
+                let (rest, mut node) = parse_group(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseParen {
                     return make_error(&tokens[0], "expected ')'");
                 }
-                let node = Node::new_nested(NodeKind::Parens, &tokens[0], node);
+                assert_eq!(node.kind, NodeKind::Group);
+                node.kind = NodeKind::Parens;
                 tokens = &rest[1..];
                 group.items.push(node);
             }
             TKind::OpenBracket => {
-                let (rest, node) = parse_group(&tokens[1..])?;
+                let (rest, mut node) = parse_group(&tokens[1..])?;
                 if rest[0].kind != TKind::CloseBracket {
                     return make_error(&tokens[0], "expected ']'");
                 }
-                let node = Node::new_nested(NodeKind::Brackets, &tokens[0], node);
+                assert_eq!(node.kind, NodeKind::Group);
+                node.kind = NodeKind::Brackets;
                 tokens = &rest[1..];
                 group.items.push(node);
             }
@@ -206,6 +199,44 @@ fn expect_node(nodes: NList, kind: NodeKind) -> Result<&Node, TError> {
         Ok(node)
     } else {
         panic!("empty node list");
+    }
+}
+
+fn merge_specifiers(node: &mut Node) {
+    let mut old_items = Vec::with_capacity(node.items.len());
+    core::mem::swap(&mut node.items, &mut old_items);
+    let mut iter = old_items.into_iter().peekable();
+    while let Some(mut item) = iter.next() {
+        if item.is_token(TKind::Struct) || item.is_token(TKind::Union) || item.is_token(TKind::Enum) {
+            if let Some(name) = iter.peek() {
+                if name.is_token(TKind::Ident) {
+                    item.name = Some(name.token);
+                    let _ = iter.next();
+                }
+            }
+            if let Some(block) = iter.peek() {
+                if block.is_node(NodeKind::Braces) {
+                    item.items = iter.next().unwrap().items;
+                }
+            }
+            item.kind = match item.token.kind {
+                TKind::Struct => NodeKind::Struct,
+                TKind::Union => NodeKind::Union,
+                TKind::Enum => NodeKind::Enum,
+                _ => unreachable!(),
+            };
+        } else if item.is_token(TKind::Attribute) {
+            if let Some(parens) = iter.peek() {
+                if parens.is_node(NodeKind::Parens) {
+                    item.items = iter.next().unwrap().items;
+                    if let Some(parens) = item.items.pop() {
+                        item.items = parens.items;
+                    }
+                }
+            }
+        } else {
+            node.items.push(item);
+        }
     }
 }
 
@@ -385,6 +416,7 @@ impl Parser {
     fn parse_function_def(&mut self, _node: &mut Node) {}
 
     fn parse_declaration(&mut self, node: &mut Node) {
+        merge_specifiers(node);
         if node.has_typedef {
             node.kind = NodeKind::Typedef;
             self.parse_typedef(node);
@@ -419,17 +451,32 @@ fn print_node(node: &Node, out: &mut String) {
         NodeKind::Token => print_token(node.token, out),
         NodeKind::Parens => {
             out.push('(');
-            print_node(&node.items[0], out);
+            for n in &node.items {
+                print_node(n, out);
+                if n.ends_with_semicolon {
+                    out.push_str("; ");
+                }
+            }
             out.push(')');
         }
         NodeKind::Braces => {
             out.push_str("\n{\n");
-            print_node(&node.items[0], out);
-            out.push_str("\n}\n");
+            for n in &node.items {
+                print_node(n, out);
+                if n.ends_with_semicolon {
+                    out.push_str(";\n");
+                }
+            }
+            out.push_str("}\n");
         }
         NodeKind::Brackets => {
             out.push('[');
-            print_node(&node.items[0], out);
+            for n in &node.items {
+                print_node(n, out);
+                if n.ends_with_semicolon {
+                    out.push_str("; ");
+                }
+            }
             out.push(']');
         }
         NodeKind::Group => {
@@ -441,7 +488,7 @@ fn print_node(node: &Node, out: &mut String) {
             }
         }
         _ => {
-            out.push_str("Node(...)\n");
+            out.push_str(&format!("***{:?}***\n", node.kind));
         }
     }
 }
