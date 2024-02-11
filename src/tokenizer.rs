@@ -102,9 +102,13 @@ fn slice_string_literal(text: ByteStr) -> (ByteStr, ByteStr) {
     let (_, rest) = text.slice_where(|c| c != b'"');
     let mut prev = 0;
     let (string, rest) = rest.skip_one().slice_where(|c| {
-        let not_quote = (c != b'"') || (prev == b'\\');
-        prev = c;
-        not_quote
+        if prev == b'\\' {
+            prev = 0;
+            true
+        } else {
+            prev = c;
+            c != b'"'
+        }
     });
     (string, rest.skip_one())
 }
@@ -112,9 +116,13 @@ fn slice_string_literal(text: ByteStr) -> (ByteStr, ByteStr) {
 fn slice_char_literal(text: ByteStr) -> (ByteStr, ByteStr) {
     let mut prev = 0;
     let (string, rest) = text.skip_one().slice_where(|c| {
-        let not_quote = (c != b'\'') || (prev == b'\\');
-        prev = c;
-        not_quote
+        if prev == b'\\' {
+            prev = 0;
+            true
+        } else {
+            prev = c;
+            c != b'\''
+        }
     });
     (string, rest.skip_one())
 }
@@ -311,6 +319,10 @@ mod tests {
         let t = ByteStr(b"'\\''cv");
         let (s, r) = super::slice_char_literal(t);
         assert_eq!(s, ByteStr(b"\\'"));
+        assert_eq!(r, ByteStr(b"cv"));
+        let t = ByteStr(b"'\\\\'cv");
+        let (s, r) = super::slice_char_literal(t);
+        assert_eq!(s, ByteStr(b"\\\\"));
         assert_eq!(r, ByteStr(b"cv"));
     }
 
