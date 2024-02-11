@@ -189,7 +189,7 @@ impl<'t> Tokenizer<'t> {
         token
     }
 
-    fn next_token(&mut self) -> Token<'t> {
+    pub fn next_token(&mut self) -> Token<'t> {
         let mut text = self.full_text;
 
         while !text.is_empty() {

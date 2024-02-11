@@ -29,11 +29,20 @@ pub enum NodeKind {
     Brackets,
     Group,
     // Second pass nodes
+    Discard,
     Struct,
     Union,
     Enum,
+    Attribute,
     Typedef,
     FunctionDef,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct Attribute<'t> {
+    name: TRef<'t>,
+    args: Vec<Node<'t>>,
 }
 
 #[derive(Debug)]
@@ -46,6 +55,7 @@ struct Node<'t> {
     has_assignment: bool,
     has_typedef: bool,
     name: Option<TRef<'t>>,
+    attributes: Vec<Attribute<'t>>,
 }
 
 impl<'t> Node<'t> {
@@ -59,15 +69,12 @@ impl<'t> Node<'t> {
             has_assignment: false,
             has_typedef: false,
             name: None,
+            attributes: Vec::new(),
         }
     }
 
     pub fn is_token(&self, kind: TKind) -> bool {
         self.kind == NodeKind::Token && self.token.kind == kind
-    }
-
-    pub fn is_node(&self, kind: NodeKind) -> bool {
-        self.kind == kind
     }
 }
 
@@ -166,7 +173,6 @@ struct BaseType<'t> {
     st: Option<StructType<'t>>,
     un: Option<StructType<'t>>,
     en: Option<EnumType<'t>>,
-    attrs: Vec<Attribute<'t>>,
 }
 
 #[derive(Debug)]
@@ -181,42 +187,78 @@ struct EnumType<'t> {
     members: Option<Vec<()>>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-struct Attribute<'t> {
-    name: TRef<'t>,
-    args: Option<Vec<()>>,
-}
-
-fn expect_node(nodes: NList, kind: NodeKind) -> Result<&Node, TError> {
-    if let Some(node) = nodes.first() {
-        if node.kind != kind {
-            return make_error(
-                node.token,
-                format!("expected {:?} but got {:?}", kind, node.kind),
-            );
+fn parse_attribute<'t>(node: Node<'t>, attributes: &mut Vec<Attribute<'t>>) {
+    let mut iter = node.items.into_iter();
+    while let Some(item) = iter.next() {
+        if item.is_token(TKind::Ident) {
+            let mut attr = Attribute {
+                name: item.token,
+                args: Vec::new(),
+            };
+            if let Some(parens) = iter.next() {
+                if parens.kind == NodeKind::Parens {
+                    attr.args = parens.items;
+                }
+            }
+            attributes.push(attr);
         }
-        Ok(node)
-    } else {
-        panic!("empty node list");
     }
 }
 
-fn merge_specifiers(node: &mut Node) {
-    let mut old_items = Vec::with_capacity(node.items.len());
-    core::mem::swap(&mut node.items, &mut old_items);
-    let mut iter = old_items.into_iter().peekable();
-    while let Some(mut item) = iter.next() {
-        if item.is_token(TKind::Struct) || item.is_token(TKind::Union) || item.is_token(TKind::Enum) {
-            if let Some(name) = iter.peek() {
+fn merge_attributes(node: &mut Node) {
+    let mut iter = node.items.iter_mut();
+    while let Some(item) = iter.next() {
+        if item.is_token(TKind::Attribute) {
+            if let Some(parens) = iter.next() {
+                if parens.kind == NodeKind::Parens {
+                    parens.kind = NodeKind::Discard;
+                    if let Some(parens) = parens.items.pop() {
+                        parse_attribute(parens, &mut item.attributes);
+                    }
+                }
+            }
+            item.kind = NodeKind::Attribute;
+        }
+    }
+    node.items.retain(|n| n.kind != NodeKind::Discard);
+}
+
+fn merge_structs(node: &mut Node) {
+    let mut iter = node.items.iter_mut().peekable();
+    while let Some(item) = iter.next() {
+        if item.is_token(TKind::Struct) || item.is_token(TKind::Union) || item.is_token(TKind::Enum)
+        {
+            // Collect all attributes before the name
+            while let Some(attr) = iter.peek_mut() {
+                if attr.kind != NodeKind::Attribute {
+                    break;
+                }
+                item.attributes.extend(attr.attributes.drain(..));
+                attr.kind = NodeKind::Discard;
+                let _ = iter.next();
+            }
+            if let Some(name) = iter.peek_mut() {
                 if name.is_token(TKind::Ident) {
                     item.name = Some(name.token);
+                    name.kind = NodeKind::Discard;
                     let _ = iter.next();
                 }
             }
-            if let Some(block) = iter.peek() {
-                if block.is_node(NodeKind::Braces) {
-                    item.items = iter.next().unwrap().items;
+            if let Some(block) = iter.peek_mut() {
+                if block.kind == NodeKind::Braces {
+                    core::mem::swap(&mut item.items, &mut block.items);
+                    block.kind = NodeKind::Discard;
+                    let _ = iter.next();
+
+                    // Collect all the attributes after the closing brace
+                    while let Some(attr) = iter.peek_mut() {
+                        if attr.kind != NodeKind::Attribute {
+                            break;
+                        }
+                        item.attributes.extend(attr.attributes.drain(..));
+                        attr.kind = NodeKind::Discard;
+                        let _ = iter.next();
+                    }
                 }
             }
             item.kind = match item.token.kind {
@@ -225,45 +267,9 @@ fn merge_specifiers(node: &mut Node) {
                 TKind::Enum => NodeKind::Enum,
                 _ => unreachable!(),
             };
-        } else if item.is_token(TKind::Attribute) {
-            if let Some(parens) = iter.peek() {
-                if parens.is_node(NodeKind::Parens) {
-                    item.items = iter.next().unwrap().items;
-                    if let Some(parens) = item.items.pop() {
-                        item.items = parens.items;
-                    }
-                }
-            }
-        } else {
-            node.items.push(item);
         }
     }
-}
-
-fn parse_attributes<'t>(nodes: NList<'t>, attrs: &mut Vec<Attribute<'t>>) -> NResult<'t, ()> {
-    let node = expect_node(nodes, NodeKind::Parens)?;
-    let node = expect_node(&node.items, NodeKind::Group)?;
-    let node = expect_node(&node.items, NodeKind::Parens)?;
-    let node = expect_node(&node.items, NodeKind::Group)?;
-    let mut items = &node.items[..];
-    while !items.is_empty() {
-        let name = expect_node(items, NodeKind::Token)?;
-        let mut attr = Attribute {
-            name: name.token,
-            args: None,
-        };
-        items = &items[1..];
-        if !items.is_empty() && items[0].is_node(NodeKind::Parens) {
-            attr.args = Some(Vec::new());
-            // TODO: parse arguments
-            items = &items[1..];
-        }
-        if !items.is_empty() && items[0].is_token(TKind::Comma) {
-            items = &items[1..];
-        }
-        attrs.push(attr);
-    }
-    Ok((&nodes[1..], ()))
+    node.items.retain(|n| n.kind != NodeKind::Discard);
 }
 
 pub struct Parser {}
@@ -273,55 +279,14 @@ impl Parser {
         Self {}
     }
 
-    fn parse_enum_type<'t>(&mut self, mut nodes: NList<'t>) -> NResult<'t, EnumType<'t>> {
-        let mut en = EnumType {
-            name: None,
-            members: None,
-        };
-        if !nodes.is_empty() && nodes[0].is_token(TKind::Ident) {
-            en.name = Some(nodes[0].token);
-            nodes = &nodes[1..];
-        }
-        if !nodes.is_empty() && nodes[0].is_node(NodeKind::Braces) {
-            en.members = Some(Vec::new());
-            // TODO: parse members
-            nodes = &nodes[1..];
-        }
-        if en.name.is_none() && en.members.is_none() {
-            return make_error(nodes[0].token, "bad enum type");
-        }
-        Ok((nodes, en))
-    }
-
-    fn parse_struct_type<'t>(&mut self, mut nodes: NList<'t>) -> NResult<'t, StructType<'t>> {
-        let mut st = StructType {
-            name: None,
-            members: None,
-        };
-        if !nodes.is_empty() && nodes[0].is_token(TKind::Ident) {
-            st.name = Some(nodes[0].token);
-            nodes = &nodes[1..];
-        }
-        if !nodes.is_empty() && nodes[0].is_node(NodeKind::Braces) {
-            st.members = Some(Vec::new());
-            // TODO: parse members
-            nodes = &nodes[1..];
-        }
-        if st.name.is_none() && st.members.is_none() {
-            return make_error(nodes[0].token, "bad struct/union type");
-        }
-        Ok((nodes, st))
-    }
-
     fn parse_base_type<'t>(&mut self, mut nodes: NList<'t>) -> NResult<'t, BaseType<'t>> {
         let mut base = BaseType {
             specs: Vec::new(),
             st: None,
             un: None,
             en: None,
-            attrs: Vec::new(),
         };
-        let mut prev = nodes;
+        // let mut prev = nodes;
         while !nodes.is_empty() {
             let node = &nodes[0];
             match node.kind {
@@ -330,34 +295,15 @@ impl Parser {
                     match token.kind {
                         TKind::Ident => {
                             base.specs.push(token);
-                            prev = nodes;
+                            // prev = nodes;
                             nodes = &nodes[1..];
                         }
                         TKind::Typedef => {
                             // skip typedef keyword
                             nodes = &nodes[1..];
                         }
-                        TKind::Struct => {
-                            let (rest, st) = self.parse_struct_type(&nodes[1..])?;
-                            base.st = Some(st);
-                            nodes = rest;
-                        }
-                        TKind::Union => {
-                            let (rest, un) = self.parse_struct_type(&nodes[1..])?;
-                            base.un = Some(un);
-                            nodes = rest;
-                        }
-                        TKind::Enum => {
-                            let (rest, en) = self.parse_enum_type(&nodes[1..])?;
-                            base.en = Some(en);
-                            nodes = rest;
-                        }
                         TKind::Asterisk => {
                             break;
-                        }
-                        TKind::Attribute => {
-                            let (rest, _) = parse_attributes(&nodes[1..], &mut base.attrs)?;
-                            nodes = rest;
                         }
                         _ => {
                             return make_error(token, "unknown token");
@@ -370,6 +316,19 @@ impl Parser {
                 NodeKind::Brackets => {
                     break;
                 }
+                NodeKind::Struct => {
+                    nodes = &nodes[1..];
+                }
+                NodeKind::Union => {
+                    nodes = &nodes[1..];
+                }
+                NodeKind::Enum => {
+                    nodes = &nodes[1..];
+                }
+                NodeKind::Attribute => {
+                    // println!("attr {:#?}", node);
+                    nodes = &nodes[1..];
+                }
                 _ => {
                     return make_error(&node.token, "unknown node");
                 }
@@ -380,43 +339,46 @@ impl Parser {
 
     fn parse_typedef(&mut self, node: &mut Node) {
         let nodes = &node.items;
-        let (rest, base) = self.parse_base_type(nodes).unwrap();
+        let (_rest, base) = self.parse_base_type(nodes).unwrap();
 
         // if node.has_comma || node.has_assignment {
         //     println!("warning: Comma operator in typedef is not supported for now {:#?}", node.items[0].token);
         //     return;
         // }
-        if let Some(ref st) = base.st {
-            if let Some(name) = st.name {
-                print!("[struct {:?}] ", name.text);
-            } else {
-                print!("[struct anon] ");
-            }
-        }
-        if let Some(ref st) = base.un {
-            if let Some(name) = st.name {
-                print!("[union {:?}] ", name.text);
-            } else {
-                print!("[union anon] ");
-            }
-        }
-        if let Some(ref st) = base.en {
-            if let Some(name) = st.name {
-                print!("[enum {:?}] ", name.text);
-            } else {
-                print!("[enum anon] ");
-            }
-        }
-        for item in base.specs.iter() {
-            print!("{:?} ", item.text);
-        }
-        println!();
+        // if let Some(ref st) = base.st {
+        //     if let Some(name) = st.name {
+        //         print!("[struct {:?}] ", name.text);
+        //     } else {
+        //         print!("[struct anon] ");
+        //     }
+        // }
+        // if let Some(ref st) = base.un {
+        //     if let Some(name) = st.name {
+        //         print!("[union {:?}] ", name.text);
+        //     } else {
+        //         print!("[union anon] ");
+        //     }
+        // }
+        // if let Some(ref st) = base.en {
+        //     if let Some(name) = st.name {
+        //         print!("[enum {:?}] ", name.text);
+        //     } else {
+        //         print!("[enum anon] ");
+        //     }
+        // }
+        // for item in base.specs.iter() {
+        //     print!("{:?} ", item.text);
+        // }
+        // println!();
     }
 
-    fn parse_function_def(&mut self, _node: &mut Node) {}
+    fn parse_function_def(&mut self, _node: &mut Node) {
+        // println!("TODO: function definition");
+    }
 
     fn parse_declaration(&mut self, node: &mut Node) {
-        merge_specifiers(node);
+        merge_attributes(node);
+        merge_structs(node);
         if node.has_typedef {
             node.kind = NodeKind::Typedef;
             self.parse_typedef(node);
@@ -424,6 +386,7 @@ impl Parser {
             node.kind = NodeKind::FunctionDef;
             self.parse_function_def(node);
         } else {
+            // println!("TODO: variable declaration");
         }
     }
 
@@ -440,9 +403,13 @@ impl Parser {
 
         let mut out = String::new();
         print_node(&node, &mut out);
-        std::fs::write("out.c", &out).unwrap();
+        std::fs::write("stage1.c", &out).unwrap();
 
         self.parse_top_level(&mut node);
+
+        out.clear();
+        print_node(&node, &mut out);
+        std::fs::write("stage2.c", &out).unwrap();
     }
 }
 
@@ -520,30 +487,28 @@ mod tests {
     use crate::tokenizer::Tokenizer;
     use crate::utils::ByteStr;
 
+    fn tokenize_code(code: &str) -> Vec<Token> {
+        let mut tokenizer = Tokenizer::new(ByteStr(code.as_bytes()));
+        tokenizer.tokenize()
+    }
+
+    fn parse_code(tokens: TList) -> Node {
+        let (rest, node) = parse_group(&tokens).unwrap();
+        assert_eq!(rest[0].kind, TKind::EndOfFile);
+        node
+    }
+
     #[test]
     fn test_attributes() {
-        let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed(5),))"));
-        let tokens = tokenizer.tokenize();
-        let (rest, node) = parse_group(&tokens).unwrap();
-        assert_eq!(rest[0].kind, TKind::EndOfFile);
-        let mut attrs = Vec::new();
-        let (rest, _) = parse_attributes(&node.items[1..], &mut attrs).unwrap();
-        assert_eq!(rest.len(), 0);
-        assert_eq!(attrs.len(), 1);
-        assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
-        assert!(attrs[0].args.is_some());
+        let tokens = tokenize_code("__attribute__((,packed,aligned(4,5)))");
+        let mut node = parse_code(&tokens);
 
-        let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed,aligned(4)))"));
-        let tokens = tokenizer.tokenize();
-        let (rest, node) = parse_group(&tokens).unwrap();
-        assert_eq!(rest[0].kind, TKind::EndOfFile);
-        let mut attrs = Vec::new();
-        let (rest, _) = parse_attributes(&node.items[1..], &mut attrs).unwrap();
-        assert_eq!(rest.len(), 0);
+        merge_attributes(&mut node);
+        let attrs = &node.items[0].attributes;
         assert_eq!(attrs.len(), 2);
         assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
-        assert!(attrs[0].args.is_none());
+        assert_eq!(attrs[0].args.len(), 0);
         assert_eq!(attrs[1].name.text, ByteStr(b"aligned"));
-        assert!(attrs[1].args.is_some());
+        assert_eq!(attrs[1].args.len(), 3);
     }
 }
