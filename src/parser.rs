@@ -22,6 +22,9 @@ pub enum NodeKind {
     Braces,
     Brackets,
     Group,
+    // Second pass nodes
+    Typedef,
+    FunctionDef,
 }
 
 #[derive(Debug)]
@@ -156,13 +159,21 @@ impl Parser {
 
     fn parse_typedef(&mut self, node: &mut Node) {
         if node.has_comma || node.has_assignment {
-            println!("typedef {:#?}", node);
+            println!("warning: Unsupported typedef {:#?}", node);
+            return;
         }
     }
 
+    fn parse_function_def(&mut self, _node: &mut Node) {}
+
     fn parse_declaration(&mut self, node: &mut Node) {
         if node.has_typedef {
+            node.kind = NodeKind::Typedef;
             self.parse_typedef(node);
+        } else if !node.ends_with_semicolon {
+            node.kind = NodeKind::FunctionDef;
+            self.parse_function_def(node);
+        } else {
         }
     }
 
@@ -210,6 +221,9 @@ fn print_node(node: &Node, out: &mut String) {
                     out.push_str(";\n");
                 }
             }
+        }
+        _ => {
+            out.push_str("Node(...)\n");
         }
     }
 }
