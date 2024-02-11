@@ -4,15 +4,21 @@ use crate::tokenizer::{TKind, Token};
 #[derive(Debug)]
 struct TError<'t> {
     token: TRef<'t>,
-    message: &'t str,
+    message: String,
 }
 
 type TRef<'t> = &'t Token<'t>;
 type TList<'t> = &'t [Token<'t>];
 type TResult<'t, O> = Result<(TList<'t>, O), TError<'t>>;
 
-fn make_error<'t, O>(token: TRef<'t>, message: &'t str) -> TResult<'t, O> {
-    Err(TError { token, message })
+type NList<'t> = &'t [Node<'t>];
+type NResult<'t, O> = Result<(NList<'t>, O), TError<'t>>;
+
+fn make_error<'t, O, S: AsRef<str>>(token: TRef<'t>, message: S) -> Result<O, TError<'t>> {
+    Err(TError {
+        token,
+        message: message.as_ref().to_owned(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +28,9 @@ pub enum NodeKind {
     Braces,
     Brackets,
     Group,
+    Struct,
+    Union,
+    Enum,
     // Second pass nodes
     Typedef,
     FunctionDef,
@@ -61,6 +70,14 @@ impl<'t> Node<'t> {
             has_assignment: false,
             has_typedef: false,
         }
+    }
+
+    pub fn is_token(&self, kind: TKind) -> bool {
+        self.kind == NodeKind::Token && self.token.kind == kind
+    }
+
+    pub fn is_node(&self, kind: NodeKind) -> bool {
+        self.kind == kind
     }
 }
 
@@ -150,6 +167,74 @@ fn parse_group(mut tokens: TList) -> TResult<Node> {
     Ok((tokens, list))
 }
 
+#[derive(Debug)]
+struct BaseType<'t> {
+    specs: Vec<TRef<'t>>,
+    st: Option<StructType<'t>>,
+    un: Option<StructType<'t>>,
+    en: Option<EnumType<'t>>,
+    attrs: Vec<Attribute<'t>>,
+}
+
+#[derive(Debug)]
+struct StructType<'t> {
+    name: Option<TRef<'t>>,
+    members: Option<Vec<()>>,
+}
+
+#[derive(Debug)]
+struct EnumType<'t> {
+    name: Option<TRef<'t>>,
+    members: Option<Vec<()>>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct Attribute<'t> {
+    name: TRef<'t>,
+    args: Option<Vec<()>>,
+}
+
+fn expect_node(nodes: NList, kind: NodeKind) -> Result<&Node, TError> {
+    if let Some(node) = nodes.first() {
+        if node.kind != kind {
+            return make_error(
+                node.token,
+                format!("expected {:?} but got {:?}", kind, node.kind),
+            );
+        }
+        Ok(node)
+    } else {
+        panic!("empty node list");
+    }
+}
+
+fn parse_attributes<'t>(nodes: NList<'t>, attrs: &mut Vec<Attribute<'t>>) -> NResult<'t, ()> {
+    let node = expect_node(nodes, NodeKind::Parens)?;
+    let node = expect_node(&node.items, NodeKind::Group)?;
+    let node = expect_node(&node.items, NodeKind::Parens)?;
+    let node = expect_node(&node.items, NodeKind::Group)?;
+    let mut items = &node.items[..];
+    while !items.is_empty() {
+        let name = expect_node(items, NodeKind::Token)?;
+        let mut attr = Attribute {
+            name: name.token,
+            args: None,
+        };
+        items = &items[1..];
+        if !items.is_empty() && items[0].is_node(NodeKind::Parens) {
+            attr.args = Some(Vec::new());
+            // TODO: parse arguments
+            items = &items[1..];
+        }
+        if !items.is_empty() && items[0].is_token(TKind::Comma) {
+            items = &items[1..];
+        }
+        attrs.push(attr);
+    }
+    Ok((&nodes[1..], ()))
+}
+
 pub struct Parser {}
 
 impl Parser {
@@ -157,11 +242,144 @@ impl Parser {
         Self {}
     }
 
-    fn parse_typedef(&mut self, node: &mut Node) {
-        if node.has_comma || node.has_assignment {
-            println!("warning: Unsupported typedef {:#?}", node);
-            return;
+    fn parse_enum_type<'t>(&mut self, mut nodes: NList<'t>) -> NResult<'t, EnumType<'t>> {
+        let mut en = EnumType {
+            name: None,
+            members: None,
+        };
+        if !nodes.is_empty() && nodes[0].is_token(TKind::Ident) {
+            en.name = Some(nodes[0].token);
+            nodes = &nodes[1..];
         }
+        if !nodes.is_empty() && nodes[0].is_node(NodeKind::Braces) {
+            en.members = Some(Vec::new());
+            // TODO: parse members
+            nodes = &nodes[1..];
+        }
+        if en.name.is_none() && en.members.is_none() {
+            return make_error(nodes[0].token, "bad enum type");
+        }
+        Ok((nodes, en))
+    }
+
+    fn parse_struct_type<'t>(&mut self, mut nodes: NList<'t>) -> NResult<'t, StructType<'t>> {
+        let mut st = StructType {
+            name: None,
+            members: None,
+        };
+        if !nodes.is_empty() && nodes[0].is_token(TKind::Ident) {
+            st.name = Some(nodes[0].token);
+            nodes = &nodes[1..];
+        }
+        if !nodes.is_empty() && nodes[0].is_node(NodeKind::Braces) {
+            st.members = Some(Vec::new());
+            // TODO: parse members
+            nodes = &nodes[1..];
+        }
+        if st.name.is_none() && st.members.is_none() {
+            return make_error(nodes[0].token, "bad struct/union type");
+        }
+        Ok((nodes, st))
+    }
+
+    fn parse_base_type<'t>(&mut self, mut nodes: NList<'t>) -> NResult<'t, BaseType<'t>> {
+        let mut base = BaseType {
+            specs: Vec::new(),
+            st: None,
+            un: None,
+            en: None,
+            attrs: Vec::new(),
+        };
+        let mut prev = nodes;
+        while !nodes.is_empty() {
+            let node = &nodes[0];
+            match node.kind {
+                NodeKind::Token => {
+                    let token = &node.token;
+                    match token.kind {
+                        TKind::Ident => {
+                            base.specs.push(token);
+                            prev = nodes;
+                            nodes = &nodes[1..];
+                        }
+                        TKind::Typedef => {
+                            // skip typedef keyword
+                            nodes = &nodes[1..];
+                        }
+                        TKind::Struct => {
+                            let (rest, st) = self.parse_struct_type(&nodes[1..])?;
+                            base.st = Some(st);
+                            nodes = rest;
+                        }
+                        TKind::Union => {
+                            let (rest, un) = self.parse_struct_type(&nodes[1..])?;
+                            base.un = Some(un);
+                            nodes = rest;
+                        }
+                        TKind::Enum => {
+                            let (rest, en) = self.parse_enum_type(&nodes[1..])?;
+                            base.en = Some(en);
+                            nodes = rest;
+                        }
+                        TKind::Asterisk => {
+                            break;
+                        }
+                        TKind::Attribute => {
+                            let (rest, _) = parse_attributes(&nodes[1..], &mut base.attrs)?;
+                            nodes = rest;
+                        }
+                        _ => {
+                            return make_error(token, "unknown token");
+                        }
+                    }
+                }
+                NodeKind::Parens => {
+                    break;
+                }
+                NodeKind::Brackets => {
+                    break;
+                }
+                _ => {
+                    return make_error(&node.token, "unknown node");
+                }
+            }
+        }
+        Ok((nodes, base))
+    }
+
+    fn parse_typedef(&mut self, node: &mut Node) {
+        let nodes = &node.items;
+        let (rest, base) = self.parse_base_type(nodes).unwrap();
+
+        // if node.has_comma || node.has_assignment {
+        //     println!("warning: Comma operator in typedef is not supported for now {:#?}", node.items[0].token);
+        //     return;
+        // }
+        if let Some(ref st) = base.st {
+            if let Some(name) = st.name {
+                print!("[struct {:?}] ", name.text);
+            } else {
+                print!("[struct anon] ");
+            }
+        }
+        if let Some(ref st) = base.un {
+            if let Some(name) = st.name {
+                print!("[union {:?}] ", name.text);
+            } else {
+                print!("[union anon] ");
+            }
+        }
+        if let Some(ref st) = base.en {
+            if let Some(name) = st.name {
+                print!("[enum {:?}] ", name.text);
+            } else {
+                print!("[enum anon] ");
+            }
+        }
+        for item in base.specs.iter() {
+            print!("{:?} ", item.text);
+        }
+        println!();
     }
 
     fn parse_function_def(&mut self, _node: &mut Node) {}
@@ -251,28 +469,34 @@ fn print_token(token: TRef, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    // use super::*;
-    // use crate::tokenizer::Tokenizer;
-    // use crate::utils::ByteStr;
+    use super::*;
+    use crate::tokenizer::Tokenizer;
+    use crate::utils::ByteStr;
 
-    // #[test]
-    // fn test_attributes() {
-    //     let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed(5),))"));
-    //     let tokens = tokenizer.tokenize();
-    //     let (rest, attrs) = parse_attribute(&tokens).unwrap();
-    //     assert_eq!(attrs.len(), 1);
-    //     assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
-    //     assert_eq!(attrs[0].args.len(), 1);
-    //     assert_eq!(rest[0].kind, TKind::EndOfFile);
+    #[test]
+    fn test_attributes() {
+        let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed(5),))"));
+        let tokens = tokenizer.tokenize();
+        let (rest, node) = parse_group(&tokens).unwrap();
+        assert_eq!(rest[0].kind, TKind::EndOfFile);
+        let mut attrs = Vec::new();
+        let (rest, _) = parse_attributes(&node.items[1..], &mut attrs).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
+        assert!(attrs[0].args.is_some());
 
-    //     let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed,aligned(4)))"));
-    //     let tokens = tokenizer.tokenize();
-    //     let (rest, attrs) = parse_attribute(&tokens).unwrap();
-    //     assert_eq!(attrs.len(), 2);
-    //     assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
-    //     assert_eq!(attrs[0].args.len(), 0);
-    //     assert_eq!(attrs[1].name.text, ByteStr(b"aligned"));
-    //     assert_eq!(attrs[1].args.len(), 1);
-    //     assert_eq!(rest[0].kind, TKind::EndOfFile);
-    // }
+        let mut tokenizer = Tokenizer::new(ByteStr(b"__attribute__((packed,aligned(4)))"));
+        let tokens = tokenizer.tokenize();
+        let (rest, node) = parse_group(&tokens).unwrap();
+        assert_eq!(rest[0].kind, TKind::EndOfFile);
+        let mut attrs = Vec::new();
+        let (rest, _) = parse_attributes(&node.items[1..], &mut attrs).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs[0].name.text, ByteStr(b"packed"));
+        assert!(attrs[0].args.is_none());
+        assert_eq!(attrs[1].name.text, ByteStr(b"aligned"));
+        assert!(attrs[1].args.is_some());
+    }
 }

@@ -44,7 +44,7 @@ static PUNCT_LIST: [PToken; 48] = [
     PToken(b"-", TKind::Punct),
     PToken(b",", TKind::Comma),
     PToken(b"+", TKind::Punct),
-    PToken(b"*", TKind::Punct),
+    PToken(b"*", TKind::Asterisk),
     PToken(b")", TKind::CloseParen),
     PToken(b"(", TKind::OpenParen),
     PToken(b"&", TKind::Punct),
@@ -53,10 +53,11 @@ static PUNCT_LIST: [PToken; 48] = [
     PToken(b"!", TKind::Punct),
 ];
 
-static KEYWORD_LIST: [PToken; 5] = [
+static KEYWORD_LIST: [PToken; 6] = [
     PToken(b"__attribute__", TKind::Attribute),
     PToken(b"typedef", TKind::Typedef),
     PToken(b"struct", TKind::Struct),
+    PToken(b"union", TKind::Union),
     PToken(b"enum", TKind::Enum),
     PToken(b"asm", TKind::Asm),
 ];
@@ -68,6 +69,7 @@ pub enum TKind {
     Number,
     String,
     Char,
+    Asterisk,
     Assignment,
     Comma,
     Colon,
@@ -78,8 +80,9 @@ pub enum TKind {
     CloseParen,
     OpenBracket,
     CloseBracket,
-    Struct,
     Typedef,
+    Struct,
+    Union,
     Enum,
     Attribute,
     Asm,
