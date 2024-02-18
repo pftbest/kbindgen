@@ -219,7 +219,7 @@ fn parse_attribute<'t>(node: &mut Node<'t>, attributes: &mut Vec<Attribute<'t>>)
             let ident = attr[0].token;
             if ident.text.0 == b"packed" {
                 attributes.push(Attribute::Packed);
-            } else if ident.text.0 == b"aligned" {
+            } else if ident.text.0 == b"aligned" || ident.text.0 == b"__aligned__" {
                 if let Some(parens) = attr.get(1) {
                     if parens.kind == NodeKind::Parens {
                         if let Some(arg) = parens.items.first() {
@@ -326,6 +326,7 @@ struct DeclType<'t> {
     is_const: bool,
     is_volatile: bool,
     is_noreturn: bool,
+    is_bit_field: Option<u8>,
 }
 
 impl<'t> DeclType<'t> {
@@ -344,6 +345,7 @@ impl<'t> DeclType<'t> {
             is_const: false,
             is_volatile: false,
             is_noreturn: false,
+            is_bit_field: None,
         }
     }
 
@@ -388,9 +390,13 @@ impl<'t> Parser<'t> {
         &mut self,
         node: &mut Node<'t>,
     ) -> Result<StructUnionType<'t>, TError<'t>> {
+        let mut members = Vec::new();
+        for item in node.items.iter_mut() {
+            self.parse_declarations(item, &mut members)?;
+        }
         Ok(StructUnionType {
             name: node.name,
-            members: Vec::new(),
+            members,
         })
     }
 
@@ -559,6 +565,10 @@ impl<'t> Parser<'t> {
                         // Pointer is not part of the base type
                         break;
                     }
+                    TKind::Colon => {
+                        // Bit field is not part of the base type
+                        break;
+                    }
                     _ => {
                         return make_error(item.token, "Unexpected token in a type declaration");
                     }
@@ -643,9 +653,23 @@ impl<'t> Parser<'t> {
                 items = &mut items[1..];
             }
         }
-        while !items.is_empty() && items[0].kind == NodeKind::Attribute {
-            parse_attribute(&mut items[0], &mut decl.attributes);
-            items = &mut items[1..];
+        if !items.is_empty() && items[0].is_token(TKind::Colon) {
+            // Bit field
+            if items.len() > 1 && items[1].is_token(TKind::Number) {
+                if let Ok(bits) = items[1].token.text.parse() {
+                    decl.is_bit_field = Some(bits);
+                } else {
+                    return make_error(items[1].token, "Invalid number");
+                }
+                items = &mut items[2..];
+            } else {
+                return make_error(items[0].token, "Expected a number after ':'");
+            }
+        } else {
+            while !items.is_empty() && items[0].kind == NodeKind::Attribute {
+                parse_attribute(&mut items[0], &mut decl.attributes);
+                items = &mut items[1..];
+            }
         }
         if !items.is_empty() {
             if items[0].kind == NodeKind::Braces {
@@ -715,7 +739,11 @@ impl<'t> Parser<'t> {
         Ok(())
     }
 
-    fn parse_declaration(&mut self, node: &mut Node<'t>) -> Result<(), TError<'t>> {
+    fn parse_declarations(
+        &mut self,
+        node: &mut Node<'t>,
+        result: &mut Vec<DeclType<'t>>,
+    ) -> Result<(), TError<'t>> {
         if node.items.is_empty() || node.items[0].is_token(TKind::StaticAssert) {
             node.kind = NodeKind::Discard;
             return Ok(());
@@ -739,6 +767,15 @@ impl<'t> Parser<'t> {
             }
             let mut decl = base.clone();
             self.parse_declarator(&mut decl, items)?;
+            result.push(decl);
+        }
+        Ok(())
+    }
+
+    fn parse_global_declarations(&mut self, node: &mut Node<'t>) -> Result<(), TError<'t>> {
+        let mut declarations = Vec::new();
+        self.parse_declarations(node, &mut declarations)?;
+        for decl in declarations {
             if decl.is_typedef {
                 if let Some(name) = decl.name {
                     self.typedef.insert(name.text, decl);
@@ -753,7 +790,7 @@ impl<'t> Parser<'t> {
     fn parse_top_level(&mut self, root_node: &mut Node<'t>) {
         assert_eq!(root_node.kind, NodeKind::Group);
         for statement in root_node.items.iter_mut() {
-            if let Err(err) = self.parse_declaration(statement) {
+            if let Err(err) = self.parse_global_declarations(statement) {
                 eprintln!(
                     "warning: {}\n  --> {:?} @ {:?}:{}",
                     err.message, err.token.text, err.token.file_name, err.token.line_number
@@ -831,6 +868,9 @@ fn print_node(node: &Node, out: &mut String) {
                 }
             }
             out.push_str("}\n");
+        }
+        NodeKind::Discard => {
+            // skip
         }
         _ => {
             out.push_str(&format!("***{:?}***\n", node.kind));
