@@ -1,8 +1,38 @@
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, Hasher};
+
+pub type FastHashMap<K, V> = HashMap<K, V, Fnv1aBuilder>;
+pub type FastHashSet<K> = HashSet<K, Fnv1aBuilder>;
+
+#[derive(Default)]
+pub struct Fnv1aBuilder;
+impl BuildHasher for Fnv1aBuilder {
+    type Hasher = Fnv1aHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        Fnv1aHasher(0xcbf29ce484222325)
+    }
+}
+
+pub struct Fnv1aHasher(u64);
+impl Hasher for Fnv1aHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= byte as u64;
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+}
+
 /// Thin wrapper around `&[u8]`
 ///
 /// Implements `Debug` print using `from_utf8_lossy` and adds some convenience
 /// methods for slicing and trimming as if it's an ascii string.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteStr<'a>(pub &'a [u8]);
 
 impl<'a> From<&'a [u8]> for ByteStr<'a> {

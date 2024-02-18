@@ -1,65 +1,107 @@
-use crate::utils::ByteStr;
+use crate::utils::{ByteStr, FastHashMap};
 
 struct PToken(&'static [u8], TKind);
 
-static PUNCT_LIST: [PToken; 48] = [
-    PToken(b">>=", TKind::Punct),
-    PToken(b"<<=", TKind::Punct),
-    PToken(b"...", TKind::Punct),
-    PToken(b"||", TKind::Punct),
-    PToken(b"|=", TKind::Punct),
-    PToken(b"^=", TKind::Punct),
-    PToken(b">>", TKind::Punct),
-    PToken(b">=", TKind::Punct),
-    PToken(b"==", TKind::Punct),
-    PToken(b"<=", TKind::Punct),
-    PToken(b"<<", TKind::Punct),
-    PToken(b"/=", TKind::Punct),
-    PToken(b"->", TKind::Punct),
-    PToken(b"-=", TKind::Punct),
-    PToken(b"--", TKind::Punct),
-    PToken(b"+=", TKind::Punct),
-    PToken(b"++", TKind::Punct),
+/// This punctuator list is sorted by frequency from the most used to least used
+/// Except in cases where the punctuator is a prefix of another punctuator
+/// In that case, the longer punctuator comes first
+/// This is verified in the `test_punct_list` unit test
+const PUNCT_LIST: &[PToken] = &[
+    PToken(b")", TKind::CloseParen),
+    PToken(b"(", TKind::OpenParen),
+    PToken(b";", TKind::Semicolon),
     PToken(b"*=", TKind::Punct),
+    PToken(b"*", TKind::Asterisk),
+    PToken(b",", TKind::Comma),
+    PToken(b"}", TKind::CloseBrace),
+    PToken(b"{", TKind::OpenBrace),
+    PToken(b":", TKind::Colon),
+    PToken(b"->", TKind::Punct),
     PToken(b"&=", TKind::Punct),
     PToken(b"&&", TKind::Punct),
-    PToken(b"%=", TKind::Punct),
-    PToken(b"##", TKind::Punct),
+    PToken(b"&", TKind::Punct),
+    PToken(b"==", TKind::Punct),
+    PToken(b"=", TKind::Assignment),
     PToken(b"!=", TKind::Punct),
-    PToken(b"~", TKind::Punct),
-    PToken(b"}", TKind::CloseBrace),
-    PToken(b"|", TKind::Punct),
-    PToken(b"{", TKind::OpenBrace),
-    PToken(b"^", TKind::Punct),
+    PToken(b"!", TKind::Punct),
+    PToken(b"-=", TKind::Punct),
+    PToken(b"--", TKind::Punct),
+    PToken(b"-", TKind::Punct),
+    PToken(b"<<=", TKind::Punct),
+    PToken(b"<<", TKind::Punct),
+    PToken(b"+=", TKind::Punct),
+    PToken(b"++", TKind::Punct),
+    PToken(b"+", TKind::Punct),
     PToken(b"]", TKind::CloseBracket),
     PToken(b"[", TKind::OpenBracket),
     PToken(b"?", TKind::Punct),
-    PToken(b">", TKind::Punct),
-    PToken(b"=", TKind::Assignment),
-    PToken(b"<", TKind::Punct),
-    PToken(b";", TKind::Semicolon),
-    PToken(b":", TKind::Colon),
-    PToken(b"/", TKind::Punct),
+    PToken(b"||", TKind::Punct),
+    PToken(b"...", TKind::Punct),
     PToken(b".", TKind::Punct),
-    PToken(b"-", TKind::Punct),
-    PToken(b",", TKind::Comma),
-    PToken(b"+", TKind::Punct),
-    PToken(b"*", TKind::Asterisk),
-    PToken(b")", TKind::CloseParen),
-    PToken(b"(", TKind::OpenParen),
-    PToken(b"&", TKind::Punct),
+    PToken(b"|=", TKind::Punct),
+    PToken(b"|", TKind::Punct),
+    PToken(b"~", TKind::Punct),
+    PToken(b">>=", TKind::Punct),
+    PToken(b">>", TKind::Punct),
+    PToken(b"<=", TKind::Punct),
+    PToken(b"<", TKind::Punct),
+    PToken(b">=", TKind::Punct),
+    PToken(b">", TKind::Punct),
+    PToken(b"/=", TKind::Punct),
+    PToken(b"/", TKind::Punct),
+    PToken(b"%=", TKind::Punct),
     PToken(b"%", TKind::Punct),
+    PToken(b"^=", TKind::Punct),
+    PToken(b"^", TKind::Punct),
+    PToken(b"##", TKind::Punct),
     PToken(b"#", TKind::Punct),
-    PToken(b"!", TKind::Punct),
 ];
 
-static KEYWORD_LIST: [PToken; 6] = [
-    PToken(b"__attribute__", TKind::Attribute),
+const KEYWORD_LIST: &[PToken] = &[
+    // storage-class-specifier
     PToken(b"typedef", TKind::Typedef),
+    PToken(b"extern", TKind::Extern),
+    PToken(b"static", TKind::Static),
+    PToken(b"_Thread_local", TKind::ThreadLocal),
+    PToken(b"auto", TKind::Auto),
+    PToken(b"register", TKind::Register),
+    // type-specifier
+    PToken(b"void", TKind::Void),
+    PToken(b"char", TKind::CharType),
+    PToken(b"short", TKind::Short),
+    PToken(b"int", TKind::Int),
+    PToken(b"long", TKind::Long),
+    PToken(b"float", TKind::Float),
+    PToken(b"double", TKind::Double),
+    PToken(b"__signed__", TKind::Signed),
+    PToken(b"signed", TKind::Signed),
+    PToken(b"unsigned", TKind::Unsigned),
+    PToken(b"_Bool", TKind::Bool),
+    PToken(b"_Complex", TKind::Complex),
+    PToken(b"__int128", TKind::Int128),
+    PToken(b"__int128_t", TKind::Int128),
+    PToken(b"__uint128_t", TKind::UInt128),
+    // struct, union, enum
     PToken(b"struct", TKind::Struct),
     PToken(b"union", TKind::Union),
     PToken(b"enum", TKind::Enum),
-    PToken(b"asm", TKind::Asm),
+    // type-qualifier
+    PToken(b"const", TKind::Const),
+    PToken(b"restrict", TKind::Restrict),
+    PToken(b"volatile", TKind::Volatile),
+    PToken(b"_Atomic", TKind::Atomic),
+    // function-specifier
+    PToken(b"inline", TKind::Inline),
+    PToken(b"_Noreturn", TKind::Noreturn),
+    // alignment-specifier
+    PToken(b"_Alignas", TKind::Alignas),
+    // other keywords
+    PToken(b"_Static_assert", TKind::StaticAssert),
+    PToken(b"__attribute__", TKind::Attribute),
+    PToken(b"__typeof__", TKind::Typeof),
+    PToken(b"typeof", TKind::Typeof),
+    PToken(b"__extension__", TKind::Extension),
+    PToken(b"__builtin_va_list", TKind::BuiltinVaList),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,12 +122,48 @@ pub enum TKind {
     CloseParen,
     OpenBracket,
     CloseBracket,
+    // storage-class-specifier
     Typedef,
+    Extern,
+    Static,
+    ThreadLocal,
+    Auto,
+    Register,
+    // type-specifier
+    Void,
+    CharType,
+    Short,
+    Int,
+    Long,
+    Float,
+    Double,
+    Signed,
+    Unsigned,
+    Bool,
+    Complex,
+    Int128,
+    UInt128,
+    // struct, union, enum
     Struct,
     Union,
     Enum,
+    // type-qualifier
+    Const,
+    Restrict,
+    Volatile,
+    Atomic,
+    // function-specifier
+    Inline,
+    Noreturn,
+    // alignment-specifier
+    Alignas,
+    // other keywords
+    StaticAssert,
     Attribute,
-    Asm,
+    Typeof,
+    Extension,
+    BuiltinVaList,
+    // EOF
     EndOfFile,
 }
 
@@ -149,17 +227,23 @@ pub struct Tokenizer<'t> {
     line_number: u32,
     start_of_line: bool,
     has_space: bool,
+    keywords: FastHashMap<ByteStr<'t>, TKind>,
 }
 
 impl<'t> Tokenizer<'t> {
     pub fn new(full_text: ByteStr<'t>) -> Self {
-        Self {
+        let mut tk = Self {
             full_text,
             file_name: ByteStr(b""),
             line_number: 0,
             start_of_line: true,
             has_space: false,
+            keywords: FastHashMap::default(),
+        };
+        for kw in KEYWORD_LIST {
+            tk.keywords.insert(ByteStr(kw.0), kw.1);
         }
+        tk
     }
 
     pub fn tokenize<'a>(&'a mut self) -> Vec<Token<'t>> {
@@ -289,11 +373,8 @@ impl<'t> Tokenizer<'t> {
             }
 
             let mut ident_kind = TKind::Ident;
-            for keyword in KEYWORD_LIST.iter() {
-                if ident.0 == keyword.0 {
-                    ident_kind = keyword.1;
-                    break;
-                }
+            if let Some(kind) = self.keywords.get(&ident) {
+                ident_kind = *kind;
             }
 
             self.full_text = text;
@@ -307,6 +388,7 @@ impl<'t> Tokenizer<'t> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::utils::ByteStr;
 
     #[test]
@@ -335,5 +417,18 @@ mod tests {
         let (s, r) = super::slice_number_literal(t);
         assert_eq!(s, ByteStr(b".1e-4lf"));
         assert_eq!(r, ByteStr(b","));
+    }
+
+    #[test]
+    fn test_punct_list() {
+        for punct in PUNCT_LIST {
+            let text = ByteStr(punct.0);
+            for token in PUNCT_LIST {
+                if text.starts_with(token.0) {
+                    assert_eq!(text, ByteStr(token.0));
+                    break;
+                }
+            }
+        }
     }
 }
