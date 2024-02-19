@@ -283,6 +283,7 @@ enum PrimitiveKind {
 
 #[derive(Debug, Clone)]
 struct StructUnionType<'t> {
+    id: u64,
     name: Option<TRef<'t>>,
     members: Vec<DeclType<'t>>,
     has_definition: bool,
@@ -296,6 +297,7 @@ struct EnumVariant<'t> {
 
 #[derive(Debug, Clone)]
 struct EnumType<'t> {
+    id: u64,
     name: Option<TRef<'t>>,
     members: Vec<EnumVariant<'t>>,
     has_definition: bool,
@@ -403,6 +405,7 @@ enum Attribute<'t> {
 
 #[derive(Debug, Clone)]
 struct DeclType<'t> {
+    id: u64,
     token: TRef<'t>,
     name: Option<TRef<'t>>,
     attributes: Vec<Attribute<'t>>,
@@ -418,8 +421,9 @@ struct DeclType<'t> {
 }
 
 impl<'t> DeclType<'t> {
-    pub fn new(token: TRef<'t>) -> Self {
+    pub fn new(token: TRef<'t>, id: u64) -> Self {
         Self {
+            id,
             token,
             name: None,
             attributes: Vec::new(),
@@ -437,6 +441,7 @@ impl<'t> DeclType<'t> {
 }
 
 pub struct Parser<'t> {
+    next_id: u64,
     known_types: FastHashSet<ByteStr<'t>>,
     typedef: Vec<DeclType<'t>>,
     structs: Vec<StructUnionType<'t>>,
@@ -449,6 +454,7 @@ pub struct Parser<'t> {
 impl<'t> Parser<'t> {
     pub fn new() -> Self {
         Self {
+            next_id: 0,
             known_types: FastHashSet::default(),
             typedef: Default::default(),
             structs: Default::default(),
@@ -457,6 +463,12 @@ impl<'t> Parser<'t> {
             functions: Default::default(),
             is_function_scope: false,
         }
+    }
+
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     fn parse_struct_union(
@@ -468,6 +480,7 @@ impl<'t> Parser<'t> {
             self.parse_declarations(item, &mut members)?;
         }
         let st = StructUnionType {
+            id: self.next_id(),
             name: node.name,
             members,
             has_definition: node.has_definition,
@@ -505,6 +518,7 @@ impl<'t> Parser<'t> {
             members.push(variant);
         }
         let en = EnumType {
+            id: self.next_id(),
             name: node.name,
             members,
             has_definition: node.has_definition,
@@ -519,7 +533,7 @@ impl<'t> Parser<'t> {
         &mut self,
         mut items: &'a mut [Node<'t>],
     ) -> Result<(&'a mut [Node<'t>], DeclType<'t>), ParserError> {
-        let mut decl = DeclType::new(items[0].token);
+        let mut decl = DeclType::new(items[0].token, self.next_id());
         while !items.is_empty() {
             let item = &mut items[0];
             match item.kind {
@@ -908,6 +922,7 @@ impl<'t> Parser<'t> {
                     return make_error(node.token, "Empty declaration");
                 }
                 let mut decl = base.clone();
+                decl.id = self.next_id();
                 self.parse_declarator(&mut decl, items)?;
                 result.push(decl);
             }
@@ -973,7 +988,11 @@ impl<'t> Parser<'t> {
 
     pub fn generate_queries(&self, output: &mut String) {
         for st in &self.structs {
-            output.push_str(&format!("struct {:?} {{", st.name.map(|t| t.text)));
+            output.push_str(&format!(
+                "struct {} {:?} {{",
+                st.id,
+                st.name.map(|t| t.text)
+            ));
             for member in &st.members {
                 output.push_str(&format!("  {:?}", member.name.map(|t| t.text)));
             }
