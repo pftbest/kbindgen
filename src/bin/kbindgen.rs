@@ -1,4 +1,4 @@
-use kbindgen::parser::Parser;
+use kbindgen::parser::{self, Parser};
 use kbindgen::tokenizer::Tokenizer;
 
 fn main() {
@@ -9,5 +9,11 @@ fn main() {
     let tokens = tk.tokenize();
 
     let mut pa = Parser::new();
-    pa.parse(&tokens);
+    if let Err(err) = pa.parse(&tokens) {
+        parser::print_error("error", &err);
+    }
+
+    let mut queries = String::new();
+    pa.generate_queries(&mut queries);
+    std::fs::write("queries.c", queries).unwrap();
 }

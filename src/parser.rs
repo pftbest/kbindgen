@@ -1,21 +1,36 @@
 use crate::tokenizer::{TKind, Token};
-use crate::utils::{ByteStr, FastHashMap};
+use crate::utils::{ByteStr, FastHashSet};
 
 #[derive(Debug)]
-struct TError<'t> {
-    token: TRef<'t>,
-    message: String,
+pub struct ErrorData {
+    pub message: Box<str>,
+    pub token: Box<str>,
+    pub file_name: Box<str>,
+    pub line_number: u32,
 }
+
+#[derive(Debug)]
+pub struct ParserError(pub Box<ErrorData>);
 
 type TRef<'t> = &'t Token<'t>;
 type TList<'t> = &'t [Token<'t>];
-type TResult<'t, O> = Result<(TList<'t>, O), TError<'t>>;
+type TResult<'t, O> = Result<(TList<'t>, O), ParserError>;
 
-fn make_error<'t, O, S: AsRef<str>>(token: TRef<'t>, message: S) -> Result<O, TError<'t>> {
-    Err(TError {
-        token,
-        message: message.as_ref().to_owned(),
-    })
+pub fn print_error(prefix: &str, err: &ParserError) {
+    let err = &err.0;
+    eprintln!(
+        "{}: {}\n  --> {:?} @ {:?}:{}",
+        prefix, err.message, err.token, err.file_name, err.line_number
+    );
+}
+
+fn make_error<'t, O, S: AsRef<str>>(token: TRef<'t>, message: S) -> Result<O, ParserError> {
+    Err(ParserError(Box::new(ErrorData {
+        message: message.as_ref().into(),
+        token: String::from_utf8_lossy(token.text.0).into(),
+        file_name: String::from_utf8_lossy(token.file_name.0).into(),
+        line_number: token.line_number,
+    })))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,6 +412,7 @@ struct DeclType<'t> {
     is_const: bool,
     is_volatile: bool,
     is_static: bool,
+    is_inline: bool,
     is_noreturn: bool,
     is_bit_field: Option<IntConstExpr<'t>>,
 }
@@ -413,6 +429,7 @@ impl<'t> DeclType<'t> {
             is_const: false,
             is_static: false,
             is_volatile: false,
+            is_inline: false,
             is_noreturn: false,
             is_bit_field: None,
         }
@@ -420,20 +437,24 @@ impl<'t> DeclType<'t> {
 }
 
 pub struct Parser<'t> {
-    typedef: FastHashMap<ByteStr<'t>, DeclType<'t>>,
-    structs: FastHashMap<ByteStr<'t>, StructUnionType<'t>>,
-    unions: FastHashMap<ByteStr<'t>, StructUnionType<'t>>,
-    enums: FastHashMap<ByteStr<'t>, EnumType<'t>>,
+    known_types: FastHashSet<ByteStr<'t>>,
+    typedef: Vec<DeclType<'t>>,
+    structs: Vec<StructUnionType<'t>>,
+    unions: Vec<StructUnionType<'t>>,
+    enums: Vec<EnumType<'t>>,
+    functions: Vec<DeclType<'t>>,
     is_function_scope: bool,
 }
 
 impl<'t> Parser<'t> {
     pub fn new() -> Self {
         Self {
+            known_types: FastHashSet::default(),
             typedef: Default::default(),
             structs: Default::default(),
             unions: Default::default(),
             enums: Default::default(),
+            functions: Default::default(),
             is_function_scope: false,
         }
     }
@@ -441,7 +462,7 @@ impl<'t> Parser<'t> {
     fn parse_struct_union(
         &mut self,
         node: &mut Node<'t>,
-    ) -> Result<StructUnionType<'t>, TError<'t>> {
+    ) -> Result<StructUnionType<'t>, ParserError> {
         let mut members = Vec::new();
         for item in node.items.iter_mut() {
             self.parse_declarations(item, &mut members)?;
@@ -452,18 +473,16 @@ impl<'t> Parser<'t> {
             has_definition: node.has_definition,
         };
         if !self.is_function_scope && st.has_definition {
-            if let Some(name) = st.name {
-                if node.kind == NodeKind::Struct {
-                    self.structs.insert(name.text, st.clone());
-                } else {
-                    self.unions.insert(name.text, st.clone());
-                }
+            if node.kind == NodeKind::Struct {
+                self.structs.push(st.clone());
+            } else {
+                self.unions.push(st.clone());
             }
         }
         Ok(st)
     }
 
-    fn parse_enum(&mut self, node: &mut Node<'t>) -> Result<EnumType<'t>, TError<'t>> {
+    fn parse_enum(&mut self, node: &mut Node<'t>) -> Result<EnumType<'t>, ParserError> {
         let mut members = Vec::new();
         for items in node.items.split_mut(|n| n.is_token(TKind::Comma)) {
             if items.is_empty() {
@@ -491,9 +510,7 @@ impl<'t> Parser<'t> {
             has_definition: node.has_definition,
         };
         if !self.is_function_scope && en.has_definition {
-            if let Some(name) = en.name {
-                self.enums.insert(name.text, en.clone());
-            }
+            self.enums.push(en.clone());
         }
         Ok(en)
     }
@@ -501,7 +518,7 @@ impl<'t> Parser<'t> {
     fn parse_base_type<'a>(
         &mut self,
         mut items: &'a mut [Node<'t>],
-    ) -> Result<(&'a mut [Node<'t>], DeclType<'t>), TError<'t>> {
+    ) -> Result<(&'a mut [Node<'t>], DeclType<'t>), ParserError> {
         let mut decl = DeclType::new(items[0].token);
         while !items.is_empty() {
             let item = &mut items[0];
@@ -641,7 +658,9 @@ impl<'t> Parser<'t> {
                     TKind::Volatile => {
                         decl.is_volatile = true;
                     }
-                    TKind::Inline => {}
+                    TKind::Inline => {
+                        decl.is_inline = true;
+                    }
                     TKind::Noreturn => {
                         decl.is_noreturn = true;
                     }
@@ -652,7 +671,7 @@ impl<'t> Parser<'t> {
                         decl.type_kind = TypeKind::Special { name: item.token };
                     }
                     TKind::Ident => {
-                        if !self.typedef.contains_key(&item.token.text) {
+                        if !self.known_types.contains(&item.token.text) {
                             // Found a new type or a variable
                             break;
                         }
@@ -726,7 +745,7 @@ impl<'t> Parser<'t> {
         &mut self,
         decl: &mut DeclType<'t>,
         node: &mut Node<'t>,
-    ) -> Result<(), TError<'t>> {
+    ) -> Result<(), ParserError> {
         merge_specifiers(node);
         merge_structs(node);
 
@@ -765,7 +784,7 @@ impl<'t> Parser<'t> {
         &mut self,
         decl: &mut DeclType<'t>,
         mut items: &mut [Node<'t>],
-    ) -> Result<(), TError<'t>> {
+    ) -> Result<(), ParserError> {
         if !items.is_empty() && items[0].kind == NodeKind::Parens {
             // Function arguments
             self.parse_function_arguments(decl, &mut items[0])?;
@@ -812,7 +831,7 @@ impl<'t> Parser<'t> {
         &mut self,
         decl: &mut DeclType<'t>,
         mut items: &'a mut [Node<'t>],
-    ) -> Result<&'a mut [Node<'t>], TError<'t>> {
+    ) -> Result<&'a mut [Node<'t>], ParserError> {
         while !items.is_empty() {
             if items[0].is_token(TKind::Asterisk) {
                 decl.type_kind.make_pointer();
@@ -843,7 +862,7 @@ impl<'t> Parser<'t> {
         &mut self,
         decl: &mut DeclType<'t>,
         mut items: &mut [Node<'t>],
-    ) -> Result<(), TError<'t>> {
+    ) -> Result<(), ParserError> {
         items = self.parse_pointers(decl, items)?;
 
         while !items.is_empty() && items[0].kind == NodeKind::Attribute {
@@ -872,7 +891,7 @@ impl<'t> Parser<'t> {
         &mut self,
         node: &mut Node<'t>,
         result: &mut Vec<DeclType<'t>>,
-    ) -> Result<(), TError<'t>> {
+    ) -> Result<(), ParserError> {
         if node.items.is_empty() || node.items[0].is_token(TKind::StaticAssert) {
             node.kind = NodeKind::Discard;
             return Ok(());
@@ -898,15 +917,27 @@ impl<'t> Parser<'t> {
         Ok(())
     }
 
-    fn parse_global_declarations(&mut self, node: &mut Node<'t>) -> Result<(), TError<'t>> {
+    fn parse_global_declarations(&mut self, node: &mut Node<'t>) -> Result<(), ParserError> {
         let mut declarations = Vec::new();
         self.parse_declarations(node, &mut declarations)?;
         for decl in declarations {
             if decl.is_typedef {
                 if let Some(name) = decl.name {
-                    self.typedef.insert(name.text, decl);
+                    self.known_types.insert(name.text);
+                    self.typedef.push(decl);
                 } else {
                     return make_error(node.token, "Missing typedef name");
+                }
+            } else {
+                if matches!(decl.type_kind, TypeKind::Function { .. })
+                    && !decl.is_static
+                    && !decl.is_inline
+                {
+                    if decl.name.is_some() {
+                        self.functions.push(decl);
+                    } else {
+                        return make_error(node.token, "Missing function name");
+                    }
                 }
             }
         }
@@ -914,41 +945,40 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_top_level(&mut self, root_node: &mut Node<'t>) {
-        assert_eq!(root_node.kind, NodeKind::Group);
         for statement in root_node.items.iter_mut() {
             if let Err(err) = self.parse_global_declarations(statement) {
-                eprintln!(
-                    "warning: {}\n  --> {:?} @ {:?}:{}",
-                    err.message, err.token.text, err.token.file_name, err.token.line_number
-                );
+                print_error("warning", &err);
             }
         }
     }
 
-    pub fn parse(&mut self, tokens: TList<'t>) {
-        let (rest, mut node) = parse_group(tokens).unwrap();
-        assert_eq!(rest[0].kind, TKind::EndOfFile);
+    pub fn parse(&mut self, tokens: TList<'t>) -> Result<(), ParserError> {
+        let (rest, mut node) = parse_group(tokens)?;
+        if rest[0].kind != TKind::EndOfFile {
+            return make_error(&rest[0], "Unexpected token at the end of the file");
+        }
 
-        let mut out = String::new();
-        print_node(&node, &mut out);
-        std::fs::write("stage1.c", &out).unwrap();
+        if false {
+            let mut out = String::new();
+            print_node(&node, &mut out);
+            std::fs::write("stage1.c", &out).unwrap();
+        }
 
         self.parse_top_level(&mut node);
 
-        // out.clear();
-        // print_node(&node, &mut out);
-        // std::fs::write("stage2.c", &out).unwrap();
-
-        for (name, st) in &self.structs {
-            println!("struct {:?} {{", name);
-            for member in &st.members {
-                println!("  {:?}", member.name.map(|t| t.text));
-            }
-            println!("}};");
-        }
-
         // Save 12% execution time by not freeing the memory
         std::mem::forget(node);
+        Ok(())
+    }
+
+    pub fn generate_queries(&self, output: &mut String) {
+        for st in &self.structs {
+            output.push_str(&format!("struct {:?} {{", st.name.map(|t| t.text)));
+            for member in &st.members {
+                output.push_str(&format!("  {:?}", member.name.map(|t| t.text)));
+            }
+            output.push_str("};\n");
+        }
     }
 }
 
