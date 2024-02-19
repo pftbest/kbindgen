@@ -166,4 +166,32 @@ impl<'a> ByteStr<'a> {
         }
         true
     }
+
+    /// Trim the slice from leading and trailing `c` bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kbindgen::utils::ByteStr;
+    /// assert_eq!(ByteStr(b"__gnu_inline__").trim_char(b'_'), ByteStr(b"gnu_inline"));
+    /// assert_eq!(ByteStr(b"___").trim_char(b'_'), ByteStr(b""));
+    /// ```
+    pub fn trim_char(self, c: u8) -> Self {
+        let mut slice = self.0;
+        while let Some(&byte) = slice.first() {
+            if byte == c {
+                slice = &slice[1..];
+            } else {
+                break;
+            }
+        }
+        while let Some(&byte) = slice.last() {
+            if byte == c {
+                slice = &slice[..slice.len() - 1];
+            } else {
+                break;
+            }
+        }
+        Self(slice)
+    }
 }

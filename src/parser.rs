@@ -43,6 +43,7 @@ struct Node<'t> {
     items: Vec<Node<'t>>,
     ends_with_semicolon: bool,
     name: Option<TRef<'t>>,
+    has_definition: bool,
 }
 
 impl<'t> Node<'t> {
@@ -53,6 +54,7 @@ impl<'t> Node<'t> {
             items: Vec::new(),
             ends_with_semicolon: false,
             name: None,
+            has_definition: false,
         }
     }
 
@@ -196,6 +198,7 @@ fn merge_structs(node: &mut Node) {
             }
             if let Some(block) = iter.peek_mut() {
                 if block.kind == NodeKind::Braces {
+                    item.has_definition = true;
                     core::mem::swap(&mut item.items, &mut block.items);
                     block.kind = NodeKind::Discard;
                     let _ = iter.next();
@@ -212,26 +215,36 @@ fn merge_structs(node: &mut Node) {
     node.items.retain(|n| n.kind != NodeKind::Discard);
 }
 
+fn parse_const_integer<'t>(expr: &mut [Node<'t>]) -> Option<IntConstExpr<'t>> {
+    if expr.is_empty() {
+        return None;
+    }
+    if expr.len() == 1 && expr[0].is_token(TKind::Number) {
+        if let Ok(value) = expr[0].token.text.parse() {
+            return Some(IntConstExpr::Value(value));
+        }
+    }
+    Some(IntConstExpr::Expression(expr.to_vec()))
+}
+
 fn parse_attribute<'t>(node: &mut Node<'t>, attributes: &mut Vec<Attribute<'t>>) {
     assert_eq!(node.kind, NodeKind::Attribute);
     for attr in node.items.split_mut(|n| n.is_token(TKind::Comma)) {
         if !attr.is_empty() && attr[0].is_token(TKind::Ident) {
-            let ident = attr[0].token;
-            if ident.text.0 == b"packed" {
+            let ident = attr[0].token.text.trim_char(b'_');
+            if ident.0 == b"packed" {
                 attributes.push(Attribute::Packed);
-            } else if ident.text.0 == b"aligned" || ident.text.0 == b"__aligned__" {
-                if let Some(parens) = attr.get(1) {
+            } else if ident.0 == b"aligned" {
+                if let Some(parens) = attr.get_mut(1) {
                     if parens.kind == NodeKind::Parens {
-                        if let Some(arg) = parens.items.first() {
-                            if arg.is_token(TKind::Number) {
-                                let value = arg.token.text.parse().unwrap();
-                                attributes.push(Attribute::Aligned(value));
-                            }
+                        let expr = parse_const_integer(&mut parens.items);
+                        if let Some(expr) = expr {
+                            attributes.push(Attribute::Aligned(expr));
                         }
                     }
                 }
             } else {
-                attributes.push(Attribute::Unknown(ident));
+                attributes.push(Attribute::Unknown(attr[0].token));
             }
         }
     }
@@ -257,12 +270,20 @@ enum PrimitiveKind {
 struct StructUnionType<'t> {
     name: Option<TRef<'t>>,
     members: Vec<DeclType<'t>>,
+    has_definition: bool,
+}
+
+#[derive(Debug, Clone)]
+struct EnumVariant<'t> {
+    name: TRef<'t>,
+    value: Option<IntConstExpr<'t>>,
 }
 
 #[derive(Debug, Clone)]
 struct EnumType<'t> {
     name: Option<TRef<'t>>,
-    members: Vec<TRef<'t>>,
+    members: Vec<EnumVariant<'t>>,
+    has_definition: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -287,16 +308,31 @@ enum TypeKind<'t> {
     Special {
         name: TRef<'t>,
     },
+    Function {
+        ret: Box<TypeKind<'t>>,
+        args: Vec<DeclType<'t>>,
+        is_variadic: bool,
+    },
     Pointer {
-        base: Box<DeclType<'t>>,
+        base: Box<TypeKind<'t>>,
+        is_const: bool,
+        is_volatile: bool,
     },
     Array {
-        base: Box<DeclType<'t>>,
-        expr: Vec<Node<'t>>,
+        base: Box<TypeKind<'t>>,
+        size: Option<IntConstExpr<'t>>,
     },
 }
 
 impl<'t> TypeKind<'t> {
+    pub fn new() -> Self {
+        Self::Primitive {
+            kind: PrimitiveKind::Void,
+            is_signed: false,
+            is_unsigned: false,
+        }
+    }
+
     pub fn is_void(&self) -> bool {
         match self {
             TypeKind::Primitive {
@@ -306,12 +342,47 @@ impl<'t> TypeKind<'t> {
             _ => false,
         }
     }
+
+    pub fn make_pointer(&mut self) {
+        let mut base = Self::new();
+        core::mem::swap(self, &mut base);
+        *self = Self::Pointer {
+            base: Box::new(base),
+            is_const: false,
+            is_volatile: false,
+        };
+    }
+
+    pub fn make_array(&mut self, size: Option<IntConstExpr<'t>>) {
+        let mut base = Self::new();
+        core::mem::swap(self, &mut base);
+        *self = Self::Array {
+            base: Box::new(base),
+            size,
+        };
+    }
+
+    pub fn make_function(&mut self, args: Vec<DeclType<'t>>, is_variadic: bool) {
+        let mut base = Self::new();
+        core::mem::swap(self, &mut base);
+        *self = Self::Function {
+            ret: Box::new(base),
+            args,
+            is_variadic,
+        };
+    }
+}
+
+#[derive(Debug, Clone)]
+enum IntConstExpr<'t> {
+    Value(i64),
+    Expression(Vec<Node<'t>>),
 }
 
 #[derive(Debug, Clone)]
 enum Attribute<'t> {
     Packed,
-    Aligned(u32),
+    Aligned(IntConstExpr<'t>),
     Unknown(TRef<'t>),
 }
 
@@ -325,8 +396,9 @@ struct DeclType<'t> {
     is_typeof: bool,
     is_const: bool,
     is_volatile: bool,
+    is_static: bool,
     is_noreturn: bool,
-    is_bit_field: Option<u8>,
+    is_bit_field: Option<IntConstExpr<'t>>,
 }
 
 impl<'t> DeclType<'t> {
@@ -335,54 +407,34 @@ impl<'t> DeclType<'t> {
             token,
             name: None,
             attributes: Vec::new(),
-            type_kind: TypeKind::Primitive {
-                kind: PrimitiveKind::Void,
-                is_signed: false,
-                is_unsigned: false,
-            },
+            type_kind: TypeKind::new(),
             is_typedef: false,
             is_typeof: false,
             is_const: false,
+            is_static: false,
             is_volatile: false,
             is_noreturn: false,
             is_bit_field: None,
         }
     }
-
-    fn move_params(&mut self, decl: &mut Self) {
-        self.is_typedef = decl.is_typedef;
-        self.is_noreturn = decl.is_noreturn;
-        self.name = decl.name.take();
-    }
-
-    pub fn make_pointer(&mut self) {
-        let mut decl = Self::new(self.token);
-        core::mem::swap(self, &mut decl);
-        self.move_params(&mut decl);
-        self.type_kind = TypeKind::Pointer {
-            base: Box::new(decl),
-        };
-    }
-
-    pub fn make_array(&mut self, expr: &mut Vec<Node<'t>>) {
-        let mut decl = Self::new(self.token);
-        core::mem::swap(self, &mut decl);
-        self.move_params(&mut decl);
-        self.type_kind = TypeKind::Array {
-            base: Box::new(decl),
-            expr: core::mem::take(expr),
-        };
-    }
 }
 
 pub struct Parser<'t> {
     typedef: FastHashMap<ByteStr<'t>, DeclType<'t>>,
+    structs: FastHashMap<ByteStr<'t>, StructUnionType<'t>>,
+    unions: FastHashMap<ByteStr<'t>, StructUnionType<'t>>,
+    enums: FastHashMap<ByteStr<'t>, EnumType<'t>>,
+    is_function_scope: bool,
 }
 
 impl<'t> Parser<'t> {
     pub fn new() -> Self {
         Self {
             typedef: Default::default(),
+            structs: Default::default(),
+            unions: Default::default(),
+            enums: Default::default(),
+            is_function_scope: false,
         }
     }
 
@@ -394,17 +446,56 @@ impl<'t> Parser<'t> {
         for item in node.items.iter_mut() {
             self.parse_declarations(item, &mut members)?;
         }
-        Ok(StructUnionType {
+        let st = StructUnionType {
             name: node.name,
             members,
-        })
+            has_definition: node.has_definition,
+        };
+        if !self.is_function_scope && st.has_definition {
+            if let Some(name) = st.name {
+                if node.kind == NodeKind::Struct {
+                    self.structs.insert(name.text, st.clone());
+                } else {
+                    self.unions.insert(name.text, st.clone());
+                }
+            }
+        }
+        Ok(st)
     }
 
     fn parse_enum(&mut self, node: &mut Node<'t>) -> Result<EnumType<'t>, TError<'t>> {
-        Ok(EnumType {
+        let mut members = Vec::new();
+        for items in node.items.split_mut(|n| n.is_token(TKind::Comma)) {
+            if items.is_empty() {
+                continue;
+            }
+            if !items[0].is_token(TKind::Ident) {
+                return make_error(items[0].token, "Expected an identifier");
+            }
+            let mut variant = EnumVariant {
+                name: items[0].token,
+                value: None,
+            };
+            if items.len() > 1 {
+                if items[1].is_token(TKind::Assignment) {
+                    variant.value = parse_const_integer(&mut items[2..]);
+                } else {
+                    return make_error(items[1].token, "Expected '='");
+                }
+            }
+            members.push(variant);
+        }
+        let en = EnumType {
             name: node.name,
-            members: Vec::new(),
-        })
+            members,
+            has_definition: node.has_definition,
+        };
+        if !self.is_function_scope && en.has_definition {
+            if let Some(name) = en.name {
+                self.enums.insert(name.text, en.clone());
+            }
+        }
+        Ok(en)
     }
 
     fn parse_base_type<'a>(
@@ -420,16 +511,22 @@ impl<'t> Parser<'t> {
                         decl.is_typedef = true;
                     }
                     TKind::Extern => {}
-                    TKind::Static => {}
+                    TKind::Static => {
+                        decl.is_static = true;
+                    }
                     TKind::ThreadLocal => {
                         return make_error(item.token, "Thread local storage not supported");
                     }
-                    TKind::Auto => {}
+                    TKind::Auto => {
+                        return make_error(item.token, "Auto storage not supported");
+                    }
                     TKind::Register => {
                         return make_error(item.token, "Register storage not supported");
                     }
                     TKind::Void => {
-                        assert!(decl.type_kind.is_void());
+                        if !decl.type_kind.is_void() {
+                            return make_error(item.token, "Unexpected type declaration");
+                        }
                     }
                     TKind::CharType => {
                         if let TypeKind::Primitive { kind, .. } = &mut decl.type_kind {
@@ -580,23 +677,29 @@ impl<'t> Parser<'t> {
                     decl.attributes.push(Attribute::Unknown(item.token));
                 }
                 NodeKind::Atomic => {
-                    // ???
+                    return make_error(item.token, "Atomic types are not supported");
                 }
                 NodeKind::Typeof => {
                     decl.is_typeof = true;
                 }
                 NodeKind::Struct => {
-                    assert!(decl.type_kind.is_void());
+                    if !decl.type_kind.is_void() {
+                        return make_error(item.token, "Unexpected type declaration");
+                    }
                     let st = self.parse_struct_union(item)?;
                     decl.type_kind = TypeKind::Struct { st };
                 }
                 NodeKind::Union => {
-                    assert!(decl.type_kind.is_void());
+                    if !decl.type_kind.is_void() {
+                        return make_error(item.token, "Unexpected type declaration");
+                    }
                     let un = self.parse_struct_union(item)?;
                     decl.type_kind = TypeKind::Union { un };
                 }
                 NodeKind::Enum => {
-                    assert!(decl.type_kind.is_void());
+                    if !decl.type_kind.is_void() {
+                        return make_error(item.token, "Unexpected type declaration");
+                    }
                     let en = self.parse_enum(item)?;
                     decl.type_kind = TypeKind::Enum { en };
                 }
@@ -619,21 +722,42 @@ impl<'t> Parser<'t> {
         Ok((items, decl))
     }
 
-    fn add_type_to_scope(&mut self, decl: DeclType<'t>) -> Result<(), TError<'t>> {
-        match decl.type_kind {
-            TypeKind::Struct { .. } => {
-                // Add struct
+    fn parse_function_arguments(
+        &mut self,
+        decl: &mut DeclType<'t>,
+        node: &mut Node<'t>,
+    ) -> Result<(), TError<'t>> {
+        merge_specifiers(node);
+        merge_structs(node);
+
+        let mut args = Vec::new();
+        let mut is_variadic = false;
+
+        let old_scope = self.is_function_scope;
+        self.is_function_scope = true;
+
+        for items in node.items.split_mut(|n| n.is_token(TKind::Comma)) {
+            if items.is_empty() {
+                break;
             }
-            TypeKind::Union { .. } => {
-                // Add union
+            if items.len() == 1 {
+                if items[0].is_token(TKind::Void) {
+                    break;
+                }
+                if items[0].is_token(TKind::Ellipsis) {
+                    is_variadic = true;
+                    break;
+                }
             }
-            TypeKind::Enum { .. } => {
-                // Add enum
+            let (rest, mut base) = self.parse_base_type(items)?;
+            if !rest.is_empty() {
+                self.parse_declarator(&mut base, rest)?;
             }
-            _ => {
-                return make_error(decl.token, "Unknown type declaration");
-            }
+            args.push(base);
         }
+
+        self.is_function_scope = old_scope;
+        decl.type_kind.make_function(args, is_variadic);
         Ok(())
     }
 
@@ -644,44 +768,41 @@ impl<'t> Parser<'t> {
     ) -> Result<(), TError<'t>> {
         if !items.is_empty() && items[0].kind == NodeKind::Parens {
             // Function arguments
+            self.parse_function_arguments(decl, &mut items[0])?;
             items = &mut items[1..];
         } else {
             while !items.is_empty() && items[0].kind == NodeKind::Brackets {
                 // Array declaration
-                decl.make_array(&mut items[0].items);
+                let size = parse_const_integer(&mut items[0].items);
+                decl.type_kind.make_array(size);
                 items[0].kind = NodeKind::Discard;
                 items = &mut items[1..];
             }
         }
         if !items.is_empty() && items[0].is_token(TKind::Colon) {
             // Bit field
-            if items.len() > 1 && items[1].is_token(TKind::Number) {
-                if let Ok(bits) = items[1].token.text.parse() {
-                    decl.is_bit_field = Some(bits);
-                } else {
-                    return make_error(items[1].token, "Invalid number");
-                }
-                items = &mut items[2..];
-            } else {
+            let bits = parse_const_integer(&mut items[1..]);
+            if bits.is_none() {
                 return make_error(items[0].token, "Expected a number after ':'");
             }
+            decl.is_bit_field = bits;
         } else {
             while !items.is_empty() && items[0].kind == NodeKind::Attribute {
                 parse_attribute(&mut items[0], &mut decl.attributes);
                 items = &mut items[1..];
             }
-        }
-        if !items.is_empty() {
-            if items[0].kind == NodeKind::Braces {
-                // Function body
-                items[0].kind = NodeKind::Discard;
-            } else if items[0].is_token(TKind::Assignment) {
-                // Assignment
-            } else {
-                return make_error(
-                    items[0].token,
-                    "Unexpected token at the end of type declaration",
-                );
+            if !items.is_empty() {
+                if items[0].kind == NodeKind::Braces {
+                    // Function body
+                    items[0].kind = NodeKind::Discard;
+                } else if items[0].is_token(TKind::Assignment) {
+                    // Assignment
+                } else {
+                    return make_error(
+                        items[0].token,
+                        "Unexpected token at the end of type declaration",
+                    );
+                }
             }
         }
         Ok(())
@@ -694,11 +815,19 @@ impl<'t> Parser<'t> {
     ) -> Result<&'a mut [Node<'t>], TError<'t>> {
         while !items.is_empty() {
             if items[0].is_token(TKind::Asterisk) {
-                decl.make_pointer();
+                decl.type_kind.make_pointer();
             } else if items[0].is_token(TKind::Const) {
-                decl.is_const = true;
+                if let TypeKind::Pointer { is_const, .. } = &mut decl.type_kind {
+                    *is_const = true;
+                } else {
+                    return make_error(items[0].token, "Unexpected const");
+                }
             } else if items[0].is_token(TKind::Volatile) {
-                decl.is_volatile = true;
+                if let TypeKind::Pointer { is_volatile, .. } = &mut decl.type_kind {
+                    *is_volatile = true;
+                } else {
+                    return make_error(items[0].token, "Unexpected volatile");
+                }
             } else if items[0].is_token(TKind::Restrict) {
                 // ignore
             } else {
@@ -754,20 +883,17 @@ impl<'t> Parser<'t> {
 
         let items: &mut [Node<'t>] = &mut node.items;
         let (rest, base) = self.parse_base_type(items)?;
-        if rest.is_empty() {
-            if base.is_typedef {
-                return make_error(node.token, "Missing typedef name");
-            } else {
-                return self.add_type_to_scope(base);
+        if !rest.is_empty() {
+            for items in rest.split_mut(|n| n.is_token(TKind::Comma)) {
+                if items.is_empty() {
+                    return make_error(node.token, "Empty declaration");
+                }
+                let mut decl = base.clone();
+                self.parse_declarator(&mut decl, items)?;
+                result.push(decl);
             }
-        }
-        for items in rest.split_mut(|n| n.is_token(TKind::Comma)) {
-            if items.is_empty() {
-                return make_error(node.token, "Empty declaration");
-            }
-            let mut decl = base.clone();
-            self.parse_declarator(&mut decl, items)?;
-            result.push(decl);
+        } else if base.is_typedef {
+            return make_error(node.token, "Missing typedef name");
         }
         Ok(())
     }
@@ -926,7 +1052,7 @@ mod tests {
         parse_attribute(&mut node.items[0], &mut attrs);
         assert_eq!(attrs.len(), 2);
         assert!(matches!(attrs[0], Attribute::Packed));
-        assert!(matches!(attrs[1], Attribute::Aligned(4)));
+        assert!(matches!(attrs[1], Attribute::Aligned(IntConstExpr::Value(4))));
     }
 
     #[test]

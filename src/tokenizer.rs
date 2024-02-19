@@ -36,7 +36,7 @@ const PUNCT_LIST: &[PToken] = &[
     PToken(b"[", TKind::OpenBracket),
     PToken(b"?", TKind::Punct),
     PToken(b"||", TKind::Punct),
-    PToken(b"...", TKind::Punct),
+    PToken(b"...", TKind::Ellipsis),
     PToken(b".", TKind::Punct),
     PToken(b"|=", TKind::Punct),
     PToken(b"|", TKind::Punct),
@@ -92,6 +92,7 @@ const KEYWORD_LIST: &[PToken] = &[
     PToken(b"_Atomic", TKind::Atomic),
     // function-specifier
     PToken(b"inline", TKind::Inline),
+    PToken(b"__inline", TKind::Inline),
     PToken(b"_Noreturn", TKind::Noreturn),
     // alignment-specifier
     PToken(b"_Alignas", TKind::Alignas),
@@ -113,6 +114,7 @@ pub enum TKind {
     Char,
     Asterisk,
     Assignment,
+    Ellipsis,
     Comma,
     Colon,
     Semicolon,
