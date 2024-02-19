@@ -935,9 +935,17 @@ impl<'t> Parser<'t> {
 
         self.parse_top_level(&mut node);
 
-        out.clear();
-        print_node(&node, &mut out);
-        std::fs::write("stage2.c", &out).unwrap();
+        // out.clear();
+        // print_node(&node, &mut out);
+        // std::fs::write("stage2.c", &out).unwrap();
+
+        for (name, st) in &self.structs {
+            println!("struct {:?} {{", name);
+            for member in &st.members {
+                println!("  {:?}", member.name.map(|t| t.text));
+            }
+            println!("}};");
+        }
 
         // Save 12% execution time by not freeing the memory
         std::mem::forget(node);
@@ -984,16 +992,6 @@ fn print_node(node: &Node, out: &mut String) {
                     out.push_str(";\n");
                 }
             }
-        }
-        NodeKind::Struct | NodeKind::Union | NodeKind::Enum => {
-            out.push_str(&format!("\n***{:?}*** {{\n", node.kind));
-            for n in &node.items {
-                print_node(n, out);
-                if n.ends_with_semicolon {
-                    out.push_str(";\n");
-                }
-            }
-            out.push_str("}\n");
         }
         NodeKind::Discard => {
             // skip
@@ -1052,7 +1050,10 @@ mod tests {
         parse_attribute(&mut node.items[0], &mut attrs);
         assert_eq!(attrs.len(), 2);
         assert!(matches!(attrs[0], Attribute::Packed));
-        assert!(matches!(attrs[1], Attribute::Aligned(IntConstExpr::Value(4))));
+        assert!(matches!(
+            attrs[1],
+            Attribute::Aligned(IntConstExpr::Value(4))
+        ));
     }
 
     #[test]
