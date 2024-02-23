@@ -1,5 +1,5 @@
 use crate::tokenizer::{TKind, Token};
-use crate::utils::{ByteStr, FastHashSet};
+use crate::utils::{ByteStr, FastHashMap};
 
 #[derive(Debug)]
 pub struct ErrorData {
@@ -282,25 +282,9 @@ enum PrimitiveKind {
 }
 
 #[derive(Debug, Clone)]
-struct StructUnionType<'t> {
-    id: u64,
-    name: Option<TRef<'t>>,
-    members: Vec<DeclType<'t>>,
-    has_definition: bool,
-}
-
-#[derive(Debug, Clone)]
 struct EnumVariant<'t> {
     name: TRef<'t>,
     value: Option<IntConstExpr<'t>>,
-}
-
-#[derive(Debug, Clone)]
-struct EnumType<'t> {
-    id: u64,
-    name: Option<TRef<'t>>,
-    members: Vec<EnumVariant<'t>>,
-    has_definition: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -310,14 +294,26 @@ enum TypeKind<'t> {
         is_signed: bool,
         is_unsigned: bool,
     },
+    StructRef {
+        name: TRef<'t>,
+    },
     Struct {
-        st: StructUnionType<'t>,
+        name: Option<TRef<'t>>,
+        members: Vec<DeclType<'t>>,
+    },
+    UnionRef {
+        name: TRef<'t>,
     },
     Union {
-        un: StructUnionType<'t>,
+        name: Option<TRef<'t>>,
+        members: Vec<DeclType<'t>>,
+    },
+    EnumRef {
+        name: TRef<'t>,
     },
     Enum {
-        en: EnumType<'t>,
+        name: Option<TRef<'t>>,
+        members: Vec<EnumVariant<'t>>,
     },
     Typedef {
         name: TRef<'t>,
@@ -405,7 +401,6 @@ enum Attribute<'t> {
 
 #[derive(Debug, Clone)]
 struct DeclType<'t> {
-    id: u64,
     token: TRef<'t>,
     name: Option<TRef<'t>>,
     attributes: Vec<Attribute<'t>>,
@@ -421,9 +416,8 @@ struct DeclType<'t> {
 }
 
 impl<'t> DeclType<'t> {
-    pub fn new(token: TRef<'t>, id: u64) -> Self {
+    pub fn new(token: TRef<'t>) -> Self {
         Self {
-            id,
             token,
             name: None,
             attributes: Vec::new(),
@@ -441,99 +435,143 @@ impl<'t> DeclType<'t> {
 }
 
 pub struct Parser<'t> {
-    next_id: u64,
-    known_types: FastHashSet<ByteStr<'t>>,
-    typedef: Vec<DeclType<'t>>,
-    structs: Vec<StructUnionType<'t>>,
-    unions: Vec<StructUnionType<'t>>,
-    enums: Vec<EnumType<'t>>,
-    functions: Vec<DeclType<'t>>,
+    known_types: FastHashMap<ByteStr<'t>, usize>,
+    known_structs: FastHashMap<ByteStr<'t>, usize>,
+    known_unions: FastHashMap<ByteStr<'t>, usize>,
+    known_enums: FastHashMap<ByteStr<'t>, usize>,
+    all_types: Vec<DeclType<'t>>,
     is_function_scope: bool,
 }
 
 impl<'t> Parser<'t> {
     pub fn new() -> Self {
         Self {
-            next_id: 0,
-            known_types: FastHashSet::default(),
-            typedef: Default::default(),
-            structs: Default::default(),
-            unions: Default::default(),
-            enums: Default::default(),
-            functions: Default::default(),
+            known_types: FastHashMap::default(),
+            known_structs: FastHashMap::default(),
+            known_unions: FastHashMap::default(),
+            known_enums: FastHashMap::default(),
+            all_types: Vec::new(),
             is_function_scope: false,
         }
     }
 
-    fn next_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
+    fn add_global_type(&mut self, decl: DeclType<'t>) -> usize {
+        let id = self.all_types.len() as usize;
+        self.all_types.push(decl);
         id
+    }
+
+    fn add_struct_union_enum(&mut self, decl: &DeclType<'t>) {
+        match &decl.type_kind {
+            TypeKind::Struct { name, .. } => {
+                if let Some(name) = name {
+                    let id = self.add_global_type(decl.clone());
+                    self.known_structs.insert(name.text, id);
+                }
+            }
+            TypeKind::Union { name, .. } => {
+                if let Some(name) = name {
+                    let id = self.add_global_type(decl.clone());
+                    self.known_unions.insert(name.text, id);
+                }
+            }
+            TypeKind::Enum { name, .. } => {
+                if let Some(name) = name {
+                    let id = self.add_global_type(decl.clone());
+                    self.known_enums.insert(name.text, id);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn parse_struct_union(
         &mut self,
+        decl: &mut DeclType<'t>,
         node: &mut Node<'t>,
-    ) -> Result<StructUnionType<'t>, ParserError> {
-        let mut members = Vec::new();
-        for item in node.items.iter_mut() {
-            self.parse_declarations(item, &mut members)?;
+    ) -> Result<(), ParserError> {
+        if !decl.type_kind.is_void() {
+            return make_error(node.token, "Unexpected type declaration");
         }
-        let st = StructUnionType {
-            id: self.next_id(),
-            name: node.name,
-            members,
-            has_definition: node.has_definition,
-        };
-        if !self.is_function_scope && st.has_definition {
+        if node.has_definition {
+            let mut members = Vec::new();
+            for item in node.items.iter_mut() {
+                self.parse_declarations(item, &mut members)?;
+            }
             if node.kind == NodeKind::Struct {
-                self.structs.push(st.clone());
+                decl.type_kind = TypeKind::Struct {
+                    name: node.name,
+                    members,
+                };
             } else {
-                self.unions.push(st.clone());
+                decl.type_kind = TypeKind::Union {
+                    name: node.name,
+                    members,
+                };
+            }
+        } else {
+            if let Some(name) = node.name {
+                if node.kind == NodeKind::Struct {
+                    decl.type_kind = TypeKind::StructRef { name };
+                } else {
+                    decl.type_kind = TypeKind::UnionRef { name };
+                }
+            } else {
+                return make_error(node.token, "Missing struct/union name");
             }
         }
-        Ok(st)
+        Ok(())
     }
 
-    fn parse_enum(&mut self, node: &mut Node<'t>) -> Result<EnumType<'t>, ParserError> {
-        let mut members = Vec::new();
-        for items in node.items.split_mut(|n| n.is_token(TKind::Comma)) {
-            if items.is_empty() {
-                continue;
-            }
-            if !items[0].is_token(TKind::Ident) {
-                return make_error(items[0].token, "Expected an identifier");
-            }
-            let mut variant = EnumVariant {
-                name: items[0].token,
-                value: None,
-            };
-            if items.len() > 1 {
-                if items[1].is_token(TKind::Assignment) {
-                    variant.value = parse_const_integer(&mut items[2..]);
-                } else {
-                    return make_error(items[1].token, "Expected '='");
+    fn parse_enum(
+        &mut self,
+        decl: &mut DeclType<'t>,
+        node: &mut Node<'t>,
+    ) -> Result<(), ParserError> {
+        if !decl.type_kind.is_void() {
+            return make_error(node.token, "Unexpected type declaration");
+        }
+        if node.has_definition {
+            let mut members = Vec::new();
+            for items in node.items.split_mut(|n| n.is_token(TKind::Comma)) {
+                if items.is_empty() {
+                    continue;
                 }
+                if !items[0].is_token(TKind::Ident) {
+                    return make_error(items[0].token, "Expected an identifier");
+                }
+                let mut variant = EnumVariant {
+                    name: items[0].token,
+                    value: None,
+                };
+                if items.len() > 1 {
+                    if items[1].is_token(TKind::Assignment) {
+                        variant.value = parse_const_integer(&mut items[2..]);
+                    } else {
+                        return make_error(items[1].token, "Expected '='");
+                    }
+                }
+                members.push(variant);
             }
-            members.push(variant);
+            decl.type_kind = TypeKind::Enum {
+                name: node.name,
+                members,
+            };
+        } else {
+            if let Some(name) = node.name {
+                decl.type_kind = TypeKind::EnumRef { name };
+            } else {
+                return make_error(node.token, "Missing enum name");
+            }
         }
-        let en = EnumType {
-            id: self.next_id(),
-            name: node.name,
-            members,
-            has_definition: node.has_definition,
-        };
-        if !self.is_function_scope && en.has_definition {
-            self.enums.push(en.clone());
-        }
-        Ok(en)
+        Ok(())
     }
 
     fn parse_base_type<'a>(
         &mut self,
         mut items: &'a mut [Node<'t>],
     ) -> Result<(&'a mut [Node<'t>], DeclType<'t>), ParserError> {
-        let mut decl = DeclType::new(items[0].token, self.next_id());
+        let mut decl = DeclType::new(items[0].token);
         while !items.is_empty() {
             let item = &mut items[0];
             match item.kind {
@@ -685,11 +723,12 @@ impl<'t> Parser<'t> {
                         decl.type_kind = TypeKind::Special { name: item.token };
                     }
                     TKind::Ident => {
-                        if !self.known_types.contains(&item.token.text) {
+                        if self.known_types.contains_key(&item.token.text) {
+                            decl.type_kind = TypeKind::Typedef { name: item.token };
+                        } else {
                             // Found a new type or a variable
                             break;
                         }
-                        decl.type_kind = TypeKind::Typedef { name: item.token };
                     }
                     TKind::Asterisk => {
                         // Pointer is not part of the base type
@@ -716,25 +755,13 @@ impl<'t> Parser<'t> {
                     decl.is_typeof = true;
                 }
                 NodeKind::Struct => {
-                    if !decl.type_kind.is_void() {
-                        return make_error(item.token, "Unexpected type declaration");
-                    }
-                    let st = self.parse_struct_union(item)?;
-                    decl.type_kind = TypeKind::Struct { st };
+                    self.parse_struct_union(&mut decl, item)?;
                 }
                 NodeKind::Union => {
-                    if !decl.type_kind.is_void() {
-                        return make_error(item.token, "Unexpected type declaration");
-                    }
-                    let un = self.parse_struct_union(item)?;
-                    decl.type_kind = TypeKind::Union { un };
+                    self.parse_struct_union(&mut decl, item)?;
                 }
                 NodeKind::Enum => {
-                    if !decl.type_kind.is_void() {
-                        return make_error(item.token, "Unexpected type declaration");
-                    }
-                    let en = self.parse_enum(item)?;
-                    decl.type_kind = TypeKind::Enum { en };
+                    self.parse_enum(&mut decl, item)?;
                 }
                 NodeKind::Parens | NodeKind::Brackets | NodeKind::Braces => {
                     // Parens are not part of the base type
@@ -916,13 +943,13 @@ impl<'t> Parser<'t> {
 
         let items: &mut [Node<'t>] = &mut node.items;
         let (rest, base) = self.parse_base_type(items)?;
+        self.add_struct_union_enum(&base);
         if !rest.is_empty() {
             for items in rest.split_mut(|n| n.is_token(TKind::Comma)) {
                 if items.is_empty() {
                     return make_error(node.token, "Empty declaration");
                 }
                 let mut decl = base.clone();
-                decl.id = self.next_id();
                 self.parse_declarator(&mut decl, items)?;
                 result.push(decl);
             }
@@ -938,8 +965,8 @@ impl<'t> Parser<'t> {
         for decl in declarations {
             if decl.is_typedef {
                 if let Some(name) = decl.name {
-                    self.known_types.insert(name.text);
-                    self.typedef.push(decl);
+                    let id = self.add_global_type(decl);
+                    self.known_types.insert(name.text, id);
                 } else {
                     return make_error(node.token, "Missing typedef name");
                 }
@@ -949,7 +976,7 @@ impl<'t> Parser<'t> {
                     && !decl.is_inline
                 {
                     if decl.name.is_some() {
-                        self.functions.push(decl);
+                        self.add_global_type(decl);
                     } else {
                         return make_error(node.token, "Missing function name");
                     }
@@ -987,16 +1014,16 @@ impl<'t> Parser<'t> {
     }
 
     pub fn generate_queries(&self, output: &mut String) {
-        for st in &self.structs {
-            output.push_str(&format!(
-                "struct {} {:?} {{",
-                st.id,
-                st.name.map(|t| t.text)
-            ));
-            for member in &st.members {
-                output.push_str(&format!("  {:?}", member.name.map(|t| t.text)));
+        for ty in &self.all_types {
+            if ty.is_typedef {
+                output.push_str(&format!("typedef {:?}\n", ty.name.map(|t| t.text)));
+            } else {
+                output.push_str(&format!(
+                    "decl {:?} {:?}\n",
+                    ty.name.map(|t| t.text),
+                    ty.type_kind
+                ));
             }
-            output.push_str("};\n");
         }
     }
 }
