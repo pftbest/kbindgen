@@ -57,6 +57,12 @@ impl core::fmt::Debug for ByteStr<'_> {
 }
 
 impl<'a> ByteStr<'a> {
+    /// Returns the string as a `&str` if it's valid utf8.
+    /// Panics if the string is not valid utf8.
+    pub fn as_str(&'a self) -> &'a str {
+        core::str::from_utf8(self.0).expect("Unexpected non-utf8 string")
+    }
+
     /// Divides the string into two at an index where the predicate is false.
     ///
     /// The first slice will contain bytes from the start of a string to the point where

@@ -237,7 +237,7 @@ impl<'t> Tokenizer<'t> {
         let mut tk = Self {
             full_text,
             file_name: ByteStr(b""),
-            line_number: 0,
+            line_number: 1,
             start_of_line: true,
             has_space: false,
             keywords: FastHashMap::default(),

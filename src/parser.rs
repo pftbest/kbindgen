@@ -1,4 +1,5 @@
 use crate::tokenizer::{TKind, Token};
+use crate::types::{Attribute, DeclType, EnumVariant, IntConstExpr, PrimitiveKind, TypeKind};
 use crate::utils::{ByteStr, FastHashMap};
 
 #[derive(Debug)]
@@ -12,7 +13,7 @@ pub struct ErrorData {
 #[derive(Debug)]
 pub struct ParserError(pub Box<ErrorData>);
 
-type TRef<'t> = &'t Token<'t>;
+pub type TRef<'t> = &'t Token<'t>;
 type TList<'t> = &'t [Token<'t>];
 type TResult<'t, O> = Result<(TList<'t>, O), ParserError>;
 
@@ -52,7 +53,7 @@ pub enum NodeKind {
 }
 
 #[derive(Debug, Clone)]
-struct Node<'t> {
+pub struct Node<'t> {
     kind: NodeKind,
     token: TRef<'t>,
     items: Vec<Node<'t>>,
@@ -266,174 +267,6 @@ fn parse_attribute<'t>(node: &mut Node<'t>, attributes: &mut Vec<Attribute<'t>>)
     node.kind = NodeKind::Discard;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PrimitiveKind {
-    Void,
-    Bool,
-    Char,
-    Short,
-    Int,
-    Long,
-    LongLong,
-    Int128,
-    Float,
-    Double,
-    LongDouble,
-}
-
-#[derive(Debug, Clone)]
-struct EnumVariant<'t> {
-    name: TRef<'t>,
-    value: Option<IntConstExpr<'t>>,
-}
-
-#[derive(Debug, Clone)]
-enum TypeKind<'t> {
-    Primitive {
-        kind: PrimitiveKind,
-        is_signed: bool,
-        is_unsigned: bool,
-    },
-    StructRef {
-        name: TRef<'t>,
-    },
-    Struct {
-        name: Option<TRef<'t>>,
-        members: Vec<DeclType<'t>>,
-    },
-    UnionRef {
-        name: TRef<'t>,
-    },
-    Union {
-        name: Option<TRef<'t>>,
-        members: Vec<DeclType<'t>>,
-    },
-    EnumRef {
-        name: TRef<'t>,
-    },
-    Enum {
-        name: Option<TRef<'t>>,
-        members: Vec<EnumVariant<'t>>,
-    },
-    Typedef {
-        name: TRef<'t>,
-    },
-    Special {
-        name: TRef<'t>,
-    },
-    Function {
-        ret: Box<TypeKind<'t>>,
-        args: Vec<DeclType<'t>>,
-        is_variadic: bool,
-    },
-    Pointer {
-        base: Box<TypeKind<'t>>,
-        is_const: bool,
-        is_volatile: bool,
-    },
-    Array {
-        base: Box<TypeKind<'t>>,
-        size: Option<IntConstExpr<'t>>,
-    },
-}
-
-impl<'t> TypeKind<'t> {
-    pub fn new() -> Self {
-        Self::Primitive {
-            kind: PrimitiveKind::Void,
-            is_signed: false,
-            is_unsigned: false,
-        }
-    }
-
-    pub fn is_void(&self) -> bool {
-        match self {
-            TypeKind::Primitive {
-                kind: PrimitiveKind::Void,
-                ..
-            } => true,
-            _ => false,
-        }
-    }
-
-    pub fn make_pointer(&mut self) {
-        let mut base = Self::new();
-        core::mem::swap(self, &mut base);
-        *self = Self::Pointer {
-            base: Box::new(base),
-            is_const: false,
-            is_volatile: false,
-        };
-    }
-
-    pub fn make_array(&mut self, size: Option<IntConstExpr<'t>>) {
-        let mut base = Self::new();
-        core::mem::swap(self, &mut base);
-        *self = Self::Array {
-            base: Box::new(base),
-            size,
-        };
-    }
-
-    pub fn make_function(&mut self, args: Vec<DeclType<'t>>, is_variadic: bool) {
-        let mut base = Self::new();
-        core::mem::swap(self, &mut base);
-        *self = Self::Function {
-            ret: Box::new(base),
-            args,
-            is_variadic,
-        };
-    }
-}
-
-#[derive(Debug, Clone)]
-enum IntConstExpr<'t> {
-    Value(i64),
-    Expression(Vec<Node<'t>>),
-}
-
-#[derive(Debug, Clone)]
-enum Attribute<'t> {
-    Packed,
-    Aligned(IntConstExpr<'t>),
-    Unknown(TRef<'t>),
-}
-
-#[derive(Debug, Clone)]
-struct DeclType<'t> {
-    token: TRef<'t>,
-    name: Option<TRef<'t>>,
-    attributes: Vec<Attribute<'t>>,
-    type_kind: TypeKind<'t>,
-    is_typedef: bool,
-    is_typeof: bool,
-    is_const: bool,
-    is_volatile: bool,
-    is_static: bool,
-    is_inline: bool,
-    is_noreturn: bool,
-    is_bit_field: Option<IntConstExpr<'t>>,
-}
-
-impl<'t> DeclType<'t> {
-    pub fn new(token: TRef<'t>) -> Self {
-        Self {
-            token,
-            name: None,
-            attributes: Vec::new(),
-            type_kind: TypeKind::new(),
-            is_typedef: false,
-            is_typeof: false,
-            is_const: false,
-            is_static: false,
-            is_volatile: false,
-            is_inline: false,
-            is_noreturn: false,
-            is_bit_field: None,
-        }
-    }
-}
-
 pub struct Parser<'t> {
     known_types: FastHashMap<ByteStr<'t>, usize>,
     known_structs: FastHashMap<ByteStr<'t>, usize>,
@@ -465,19 +298,25 @@ impl<'t> Parser<'t> {
         match &decl.type_kind {
             TypeKind::Struct { name, .. } => {
                 if let Some(name) = name {
-                    let id = self.add_global_type(decl.clone());
+                    let mut decl = decl.clone();
+                    decl.is_typedef = false;
+                    let id = self.add_global_type(decl);
                     self.known_structs.insert(name.text, id);
                 }
             }
             TypeKind::Union { name, .. } => {
                 if let Some(name) = name {
-                    let id = self.add_global_type(decl.clone());
+                    let mut decl = decl.clone();
+                    decl.is_typedef = false;
+                    let id = self.add_global_type(decl);
                     self.known_unions.insert(name.text, id);
                 }
             }
             TypeKind::Enum { name, .. } => {
                 if let Some(name) = name {
-                    let id = self.add_global_type(decl.clone());
+                    let mut decl = decl.clone();
+                    decl.is_typedef = false;
+                    let id = self.add_global_type(decl);
                     self.known_enums.insert(name.text, id);
                 }
             }
@@ -994,6 +833,51 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn is_type_complete_recursive(
+        &self,
+        ty: &TypeKind<'t>,
+        visited: &mut FastHashMap<usize, bool>,
+    ) -> bool {
+        let ref_id = match ty {
+            TypeKind::StructRef { name } => Some(self.known_structs.get(&name.text).copied()),
+            TypeKind::UnionRef { name } => Some(self.known_unions.get(&name.text).copied()),
+            TypeKind::EnumRef { name } => Some(self.known_enums.get(&name.text).copied()),
+            TypeKind::Typedef { name } => Some(self.known_types.get(&name.text).copied()),
+            _ => None,
+        };
+        if let Some(maybe_id) = ref_id {
+            if let Some(id) = maybe_id {
+                if let Some(&result) = visited.get(&id) {
+                    return result;
+                } else {
+                    let result =
+                        self.is_type_complete_recursive(&self.all_types[id].type_kind, visited);
+                    visited.insert(id, result);
+                    return result;
+                }
+            } else {
+                return false;
+            }
+        }
+        match ty {
+            TypeKind::Struct { members, .. } | TypeKind::Union { members, .. } => {
+                for member in members {
+                    if !self.is_type_complete_recursive(&member.type_kind, visited) {
+                        return false;
+                    }
+                }
+                true
+            }
+            TypeKind::Array { base, .. } => self.is_type_complete_recursive(&base, visited),
+            _ => true,
+        }
+    }
+
+    fn is_type_complete(&self, ty: &TypeKind<'t>) -> bool {
+        let mut visited = FastHashMap::default();
+        self.is_type_complete_recursive(ty, &mut visited)
+    }
+
     pub fn parse(&mut self, tokens: TList<'t>) -> Result<(), ParserError> {
         let (rest, mut node) = parse_group(tokens)?;
         if rest[0].kind != TKind::EndOfFile {
@@ -1014,17 +898,39 @@ impl<'t> Parser<'t> {
     }
 
     pub fn generate_queries(&self, output: &mut String) {
-        for ty in &self.all_types {
-            if ty.is_typedef {
-                output.push_str(&format!("typedef {:?}\n", ty.name.map(|t| t.text)));
-            } else {
-                output.push_str(&format!(
-                    "decl {:?} {:?}\n",
-                    ty.name.map(|t| t.text),
-                    ty.type_kind
-                ));
+        output.push_str(&format!(
+            "unsigned long long __KBINDGEN_MAIN_QUERIES__[] = {{\n"
+        ));
+        for decl in &self.all_types {
+            if !self.is_type_complete(&decl.type_kind) {
+                eprintln!("Warning: Incomplete type {:?}", decl.name.map(|t| t.text));
+                continue;
             }
+            let name = if decl.is_typedef {
+                decl.name.unwrap().text.as_str().to_owned()
+            } else {
+                match &decl.type_kind {
+                    TypeKind::Struct { name, .. } => {
+                        format!("struct {}", name.unwrap().text.as_str())
+                    }
+                    TypeKind::Union { name, .. } => {
+                        format!("union {}", name.unwrap().text.as_str())
+                    }
+                    TypeKind::Enum { name, .. } => {
+                        format!("enum {}", name.unwrap().text.as_str())
+                    }
+                    TypeKind::Function { .. } => {
+                        // We don't need to know the size of a function
+                        continue;
+                    }
+                    _ => {
+                        panic!("Unexpected decl {:?}", decl);
+                    }
+                }
+            };
+            output.push_str(&format!("sizeof({}),\n", name));
         }
+        output.push_str("};\n");
     }
 }
 
